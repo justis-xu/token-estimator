@@ -106,6 +106,52 @@ func TestEstimateFallsBackWhenModelTableIsMissing(t *testing.T) {
 	}
 }
 
+func TestEstimateDoesNotTreatASCIISpaceAsRareSymbol(t *testing.T) {
+	tables := &Tables{
+		bins:      map[string][]byte{},
+		discounts: map[string]float64{"default": 1.0},
+	}
+
+	got := tables.Estimate("Hello world", "unknown")
+	if got != 4 {
+		t.Fatalf("Estimate() = %d, want 4 for latin words with a low-cost space", got)
+	}
+}
+
+func TestEstimateUsesModelSpecificWeightsBeforeDefaultWeights(t *testing.T) {
+	tables := &Tables{
+		bins:      map[string][]byte{},
+		discounts: map[string]float64{"default": 1.0, "gpt-4o": 1.0},
+		weights: map[string]heuristicWeights{
+			"default": {ASCIISpace: 1.0},
+			"gpt-4o":  {ASCIISpace: 0.2},
+		},
+	}
+
+	if got := tables.Estimate("Hello world", "gpt-4o"); got != 4 {
+		t.Fatalf("Estimate(gpt-4o) = %d, want model-specific low-cost space result 4", got)
+	}
+	if got := tables.Estimate("Hello world", "unknown-model"); got != 5 {
+		t.Fatalf("Estimate(unknown-model) = %d, want default-weight result 5", got)
+	}
+}
+
+func TestResolveKeyUsesSpecificGenerationBeforeFamilyFallback(t *testing.T) {
+	cases := map[string]string{
+		"Qwen2.5-72B-Instruct": "qwen2",
+		"deepseek-v3":          "deepseek-v3",
+		"DeepSeekV3":           "deepseek-v3",
+		"glm-4-9b-chat":        "glm4",
+		"GLM4":                 "glm4",
+	}
+
+	for model, want := range cases {
+		if got := resolveKey(model); got != want {
+			t.Fatalf("resolveKey(%q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
 func TestEstimateFallsBackToDefaultCJKTokenWhenDoubaoIsMissing(t *testing.T) {
 	tables := &Tables{
 		bins:      map[string][]byte{},

@@ -6,8 +6,11 @@ import os
 # so picking a large variant in the series is fine.
 HF_MODELS = {
     "qwen":     "Qwen/Qwen3.6-27B",        # Qwen3.6 (latest open; 3.7-Max not open-weight)
+    "qwen2":    "Qwen/Qwen2.5-72B-Instruct",
     "deepseek": "deepseek-ai/DeepSeek-V4-Pro",  # DeepSeek-V4 (2026-04)
+    "deepseek-v3": "deepseek-ai/DeepSeek-V3",
     "glm":      "zai-org/GLM-5.2",          # NOTE org moved THUDM -> zai-org
+    "glm4":     "zai-org/glm-4-9b-chat",
     "minimax":  "MiniMaxAI/MiniMax-M2.7",   # MiniMax-M2.7 (latest)
     "kimi":     "moonshotai/Kimi-K2.6",     # Kimi K2.6 (K2.7-Code is a coding variant)
 }

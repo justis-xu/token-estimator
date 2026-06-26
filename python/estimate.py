@@ -15,6 +15,10 @@ import unicodedata
 CJK_START = 0x4E00
 CJK_END   = 0x9FFF
 
+ASCII_SPACE_TOKEN = 0.2
+TAB_TOKEN = 0.8
+NEWLINE_TOKEN = 0.5
+
 
 def _is_latin(cp: int) -> bool:
     return (0x61 <= cp <= 0x7A) or (0x41 <= cp <= 0x5A)
@@ -77,7 +81,16 @@ def estimate(table: bytes | None, text: str, discount: float = 1.0) -> float:
 
         # Newlines
         elif ch == "\n" or ch == "\r":
-            tokens += 1.0
+            tokens += NEWLINE_TOKEN
+            i += 1
+
+        # ASCII whitespace often merges into adjacent tokens, especially in
+        # code, JSON, and Markdown indentation.
+        elif ch == "\t":
+            tokens += TAB_TOKEN
+            i += 1
+        elif ch == " ":
+            tokens += ASCII_SPACE_TOKEN
             i += 1
 
         # CJK / fullwidth / general punctuation
