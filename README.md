@@ -34,9 +34,9 @@ token-estimator 的目标：**本地、零网络、延迟接近零、误差 ≤ 
 
 **离线阶段（一次性）**：用各模型真实分词器处理 CJK 字符表里 20,992 个汉字，记录每字对应的 token 数，存成二进制文件（每模型 20KB）。同时从真实语料校准一个全局 discount 系数，用于修正 BPE 跨字合并带来的系统性高估。
 
-**在线阶段（每次调用）**：词表在服务启动时一次性加载入内存（9 个模型合计约 180KB）。估算时单遍扫描文本，CJK 字符查表累加，英文按 `ceil(词长/4)` 估算，最后乘 discount 系数取整。整个过程纯内存操作，无 IO，无网络。
+**在线阶段（每次调用）**：词表在服务启动时一次性加载入内存（当前 10 个模型合计约 240KB）。估算时单遍扫描文本，CJK 字符查表累加，英文按 `ceil(词长/4)` 估算，最后乘 discount 系数取整。整个过程纯内存操作，无 IO，无网络。
 
-词表和系数文件可以独立替换，替换后重启生效，不需要重新编译。启动时要求词表目录至少包含一个 `.bin` 文件和 `config.json`；单个模型没有专属词表时，在线估算会自动 fallback，不会让请求直接失败。
+词表和系数文件可以独立替换，替换后重启生效，不需要重新编译。启动时要求词表目录至少包含一个 `.bin` 文件和 `config.json`；单个模型没有专属词表时，在线估算会自动 fallback，不会让请求直接失败。`config.json` 里同时保存每个模型的 `discount` 和 `weights`，字符级权重会优先按模型读取，没有对应模型时再回退到 `weights.default`。
 
 ---
 
@@ -51,6 +51,9 @@ token-estimator 的目标：**本地、零网络、延迟接近零、误差 ≤ 
 | `kimi` / `moonshot` | HuggingFace tokenizer | Kimi-K2 |
 | `gpt-4o` / `o1` / `o3` / `o4` / `gpt-5` | tiktoken | o200k_base |
 | `gpt-4` / `gpt-3.5` | tiktoken | cl100k_base |
+| `qwen2` | HuggingFace tokenizer | Qwen2.5 |
+| `deepseek-v3` | HuggingFace tokenizer | DeepSeek-V3 |
+| `glm4` | HuggingFace tokenizer | GLM-4 |
 | `doubao` | Volcano Engine API | 豆包 |
 | `claude` | Anthropic API | claude-opus-4-8 |
 
@@ -118,6 +121,17 @@ TOKEN_TABLES_DIR=../python/output go test -v ./...
 
 在中文为主的混合文本（维基百科 + 中英混合技术文章）上，平均绝对误差（MAE）目标 ≤ 15%。正式中文文本通常 5%~8%，中英混合约 10%~15%。
 
+当前这批验证集是 65 条语料、约 1.9 万字符，覆盖中文/英文 Wikipedia、V2EX、阮一峰博客、Python/Go/MDN 文档片段和手写消息样本。最近一次跑出来的 MAE 如下：
+
+- `gpt-4o`: `9.7%`
+- `gpt-4`: `10.0%`
+- `deepseek` / `deepseek-v3`: `9.7%`
+- `glm` / `glm4`: `11.3%` 到 `11.4%`
+- `qwen`: `11.4%`
+- `qwen2`: `12.0%`
+- `minimax`: `11.4%`
+- `kimi`: `11.9%`
+
 以下场景建议直接调分词 API：
 
 - **精确计费**：按 token 数核算费用，误差不可接受
@@ -135,7 +149,7 @@ python/
   calculate_discount.py # 计算 BPE discount 系数
   estimate.py           # Python 版估算逻辑（与 Go 保持同步，供校准使用）
   config.py             # 模型配置
-  output/               # 生成产物（.bin × 9 + config.json）
+  output/               # 生成产物（.bin × 10 + config.json + corpus/golden）
 
 go/
   estimator.go          # 在线估算核心逻辑
