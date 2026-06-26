@@ -22,7 +22,7 @@ token-estimator 的目标：**本地、零网络、延迟接近零、误差 ≤ 
 |------|------|------|---------|--------|
 | 字符数粗估 | 差 | 极低 | 任意 | ✅ |
 | CJK-aware 固定系数 | 一般 | 极低 | 任意 | ✅ |
-| tiktoken 本地分词 | 高 | 低 | 仅 GPT | ✅ |
+| tiktoken 本地分词 | 高 | 低 | OpenAI 系列 | ✅ |
 | 直接调 API | 极高 | 高 | 任意 | ❌ |
 | **本方案（查表 + discount）** | **高** | **极低** | **多模型** | **✅** |
 
@@ -36,7 +36,7 @@ token-estimator 的目标：**本地、零网络、延迟接近零、误差 ≤ 
 
 **在线阶段（每次调用）**：词表在服务启动时一次性加载入内存（9 个模型合计约 180KB）。估算时单遍扫描文本，CJK 字符查表累加，英文按 `ceil(词长/4)` 估算，最后乘 discount 系数取整。整个过程纯内存操作，无 IO，无网络。
 
-词表和系数文件可以独立替换，替换后重启生效，不需要重新编译。
+词表和系数文件可以独立替换，替换后重启生效，不需要重新编译。启动时要求词表目录至少包含一个 `.bin` 文件和 `config.json`；单个模型没有专属词表时，在线估算会自动 fallback，不会让请求直接失败。
 
 ---
 
@@ -83,19 +83,33 @@ python calculate_discount.py  # 生成 output/config.json
 ### 2. 在 Go 服务里使用（在线）
 
 ```go
-import "token-estimator/go"
+import (
+    "log"
+    "os"
+
+    estimator "github.com/justis-xu/token-estimator/go"
+)
 
 // 服务启动时加载（TOKEN_TABLES_DIR 指向上一步生成的 output/ 目录）
-estimator.Load(os.Getenv("TOKEN_TABLES_DIR"))
+if err := estimator.Init(os.Getenv("TOKEN_TABLES_DIR")); err != nil {
+    log.Fatal(err)
+}
 
 // 每次估算
-tokens := estimator.Estimate(text, "qwen")
+tokens, err := estimator.Estimate(text, "qwen")
+if err != nil {
+    return err
+}
 ```
 
 ### 3. 运行测试
 
 ```bash
-TOKEN_TABLES_DIR=python/output go test ./go/...
+cd go
+go test ./...
+
+# 如果已经生成 python/output，可额外跑真实 golden 精度测试
+TOKEN_TABLES_DIR=../python/output go test -v ./...
 ```
 
 ---

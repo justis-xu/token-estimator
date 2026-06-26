@@ -61,6 +61,35 @@ func TestLoadReturnsErrorWhenConfigIsMissing(t *testing.T) {
 	}
 }
 
+func TestLoadReturnsErrorWhenTableLengthIsInvalid(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "doubao.bin"), []byte{1, 2, 3}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"default":1.0}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(dir); err == nil {
+		t.Fatal("Load() error = nil, want error for invalid table length")
+	}
+}
+
+func TestLoadReturnsErrorWhenConfigJSONIsInvalid(t *testing.T) {
+	dir := t.TempDir()
+	table := make([]byte, cjkCount)
+	if err := os.WriteFile(filepath.Join(dir, "doubao.bin"), table, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{bad json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(dir); err == nil {
+		t.Fatal("Load() error = nil, want error for invalid config.json")
+	}
+}
+
 func TestEstimateFallsBackWhenModelTableIsMissing(t *testing.T) {
 	doubao := make([]byte, cjkCount)
 	for i := range doubao {
@@ -74,6 +103,28 @@ func TestEstimateFallsBackWhenModelTableIsMissing(t *testing.T) {
 	got := tables.Estimate("你好", "qwen")
 	if got != 4 {
 		t.Fatalf("Estimate() = %d, want 4 from doubao fallback table", got)
+	}
+}
+
+func TestEstimateFallsBackToDefaultCJKTokenWhenDoubaoIsMissing(t *testing.T) {
+	tables := &Tables{
+		bins:      map[string][]byte{},
+		discounts: map[string]float64{"default": 1.0},
+	}
+
+	got := tables.Estimate("你好", "qwen")
+	if got != 3 {
+		t.Fatalf("Estimate() = %d, want 3 from built-in CJK fallback", got)
+	}
+}
+
+func TestPackageEstimateReturnsErrorBeforeInit(t *testing.T) {
+	old := defaultTables
+	defaultTables = nil
+	defer func() { defaultTables = old }()
+
+	if _, err := Estimate("你好", "qwen"); err == nil {
+		t.Fatal("Estimate() error = nil, want error before Init")
 	}
 }
 
