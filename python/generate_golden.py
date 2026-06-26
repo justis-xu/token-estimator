@@ -1,0 +1,80 @@
+"""
+Generate golden.jsonl — ground-truth token counts for the Go accuracy test.
+
+For each (corpus entry × model), record real token count.
+Output: output/golden.jsonl
+  {"text":"...","model":"qwen","tokens":42}
+
+Usage:
+  ARK_API_KEY=... ANTHROPIC_API_KEY=... HF_TOKEN=... python generate_golden.py
+
+This script reuses the real_count() helpers from calculate_discount.py.
+"""
+
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(__file__))
+
+from calculate_discount import real_count
+from config import ALL_MODELS, API_MODELS, OUTPUT_DIR
+
+
+def _rate_limit_interval(model_key: str) -> float:
+    cfg = API_MODELS.get(model_key)
+    if not cfg:
+        return 0.0
+    return 1.0 / cfg["rps"]
+
+
+def write_golden(
+    corpus: list[dict],
+    model_keys: list[str],
+    out_path: str,
+    real_count_fn=real_count,
+    sleep_fn=time.sleep,
+) -> int:
+    total = 0
+    with open(out_path, "w", encoding="utf-8") as out:
+        for model_key in model_keys:
+            print(f"[{model_key}] ...")
+            interval = _rate_limit_interval(model_key)
+            for entry in corpus:
+                text = entry["text"]
+                try:
+                    tokens = real_count_fn(model_key, text)
+                except Exception as e:
+                    print(f"  skip: {e}")
+                    continue
+                out.write(json.dumps(
+                    {"text": text, "model": model_key, "tokens": tokens},
+                    ensure_ascii=False,
+                ) + "\n")
+                total += 1
+                if interval:
+                    sleep_fn(interval)
+    return total
+
+
+def main():
+    corpus_path = os.path.join(OUTPUT_DIR, "corpus.jsonl")
+    if not os.path.exists(corpus_path):
+        raise FileNotFoundError(f"{corpus_path} — run scrape_corpus.py first")
+
+    corpus = []
+    with open(corpus_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                corpus.append(json.loads(line))
+
+    out_path = os.path.join(OUTPUT_DIR, "golden.jsonl")
+    total = write_golden(corpus, ALL_MODELS, out_path)
+
+    print(f"\ngolden.jsonl: {total} entries → {out_path}")
+
+
+if __name__ == "__main__":
+    main()
