@@ -1,6 +1,7 @@
 package estimator
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,6 +65,7 @@ func defaultWeights() heuristicWeights {
 // Tables holds per-model data loaded at startup.
 type Tables struct {
 	bins      map[string][]byte
+	bigrams   map[string]map[uint32]byte // model key → bigram lookup table
 	discounts map[string]segmentedDiscount
 	weights   map[string]heuristicWeights
 }
@@ -104,21 +106,36 @@ func Load(dir string) (*Tables, error) {
 	}
 
 	bins := make(map[string][]byte)
+	bigrams := make(map[string]map[uint32]byte)
 	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".bin" {
+		if e.IsDir() {
 			continue
 		}
-		key := strings.TrimSuffix(e.Name(), ".bin")
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", e.Name(), err)
+		name := e.Name()
+		switch filepath.Ext(name) {
+		case ".bin":
+			key := strings.TrimSuffix(name, ".bin")
+			data, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return nil, fmt.Errorf("read %s: %w", name, err)
+			}
+			if len(data) != cjkCount {
+				return nil, fmt.Errorf("%s: expected %d bytes, got %d (corrupt or partial table)",
+					name, cjkCount, len(data))
+			}
+			bins[key] = data
+		case ".bigram":
+			key := strings.TrimSuffix(name, ".bigram")
+			data, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return nil, fmt.Errorf("read %s: %w", name, err)
+			}
+			bg, err := parseBigramBin(data)
+			if err != nil {
+				return nil, fmt.Errorf("parse %s: %w", name, err)
+			}
+			bigrams[key] = bg
 		}
-		// Validate length to avoid out-of-range panics at lookup time.
-		if len(data) != cjkCount {
-			return nil, fmt.Errorf("%s: expected %d bytes, got %d (corrupt or partial table)",
-				e.Name(), cjkCount, len(data))
-		}
-		bins[key] = data
 	}
 	if len(bins) == 0 {
 		return nil, fmt.Errorf("no token table .bin files found in %s", dir)
@@ -160,7 +177,29 @@ func Load(dir string) (*Tables, error) {
 		discounts["default"] = segmentedDiscount{Zh: defaultDiscount, Mixed: defaultDiscount, En: defaultDiscount}
 	}
 
-	return &Tables{bins: bins, discounts: discounts, weights: weights}, nil
+	return &Tables{bins: bins, bigrams: bigrams, discounts: discounts, weights: weights}, nil
+}
+
+func parseBigramBin(data []byte) (map[uint32]byte, error) {
+	if len(data) < 4 {
+		return nil, fmt.Errorf("bigram: data too short")
+	}
+	n := binary.BigEndian.Uint32(data[:4])
+	if len(data) != 4+int(n)*5 {
+		return nil, fmt.Errorf("bigram: invalid length: expected %d bytes, got %d", 4+int(n)*5, len(data))
+	}
+	m := make(map[uint32]byte, n)
+	for i := range int(n) {
+		off := 4 + i*5
+		off1 := uint32(binary.BigEndian.Uint16(data[off:]))
+		off2 := uint32(binary.BigEndian.Uint16(data[off+2:]))
+		m[(off1<<16)|off2] = data[off+4]
+	}
+	return m, nil
+}
+
+func (t *Tables) bigramFor(key string) map[uint32]byte {
+	return t.bigrams[key] // nil if not present — caller skips bigram lookup
 }
 
 func parseWeights(raw json.RawMessage) (map[string]heuristicWeights, error) {
@@ -338,25 +377,39 @@ func (t *Tables) Estimate(text, model string) int {
 	runes := []rune(text)
 	textClass := classifyText(runes)
 	discount := t.discountFor(key, textClass)
-	var tokens float64
+	bg := t.bigramFor(key)
+	// bigramTokens: exact counts from bigram table — not scaled by discount.
+	// heuristicTokens: everything else — scaled by discount for statistical correction.
+	var bigramTokens, heuristicTokens float64
 
 	i := 0
 	for i < len(runes) {
 		cp := runes[i]
 
 		switch {
-		// CJK Unified Ideographs (main block) — table lookup or default
+		// CJK Unified Ideographs (main block) — bigram → single-char table → default
 		case cp >= cjkStart && cp <= cjkEnd:
+			if bg != nil && i+1 < len(runes) {
+				cp2 := runes[i+1]
+				if cp2 >= cjkStart && cp2 <= cjkEnd {
+					bgKey := uint32(cp-cjkStart)<<16 | uint32(cp2-cjkStart)
+					if count, ok := bg[bgKey]; ok {
+						bigramTokens += float64(count)
+						i += 2
+						continue
+					}
+				}
+			}
 			if table != nil {
-				tokens += float64(table[cp-cjkStart])
+				heuristicTokens += float64(table[cp-cjkStart])
 			} else {
-				tokens += weights.DefaultCJK
+				heuristicTokens += weights.DefaultCJK
 			}
 			i++
 
 		// CJK Extension A / Compatibility Ideographs (fallback)
 		case (cp >= 0x3400 && cp <= 0x4DBF) || (cp >= 0xF900 && cp <= 0xFAFF):
-			tokens += weights.DefaultCJK
+			heuristicTokens += weights.DefaultCJK
 			i++
 
 		// Latin letter run — scale with length
@@ -365,17 +418,17 @@ func (t *Tables) Estimate(text, model string) int {
 			for j < len(runes) && isLatin(runes[j]) {
 				j++
 			}
-			tokens += math.Ceil(float64(j-i) / weights.LatinDivisor)
+			heuristicTokens += math.Ceil(float64(j-i) / weights.LatinDivisor)
 			i = j
 
 		// Hiragana / Katakana
 		case (cp >= 0x3040 && cp <= 0x309F) || (cp >= 0x30A0 && cp <= 0x30FF):
-			tokens += weights.Hiragana
+			heuristicTokens += weights.Hiragana
 			i++
 
 		// Korean syllables
 		case cp >= 0xAC00 && cp <= 0xD7AF:
-			tokens += weights.Korean
+			heuristicTokens += weights.Korean
 			i++
 
 		// Digit run
@@ -384,41 +437,41 @@ func (t *Tables) Estimate(text, model string) int {
 			for j < len(runes) && unicode.IsDigit(runes[j]) {
 				j++
 			}
-			tokens += float64(j-i) * weights.Digit
+			heuristicTokens += float64(j-i) * weights.Digit
 			i = j
 
 		// Newlines
 		case cp == '\n' || cp == '\r':
-			tokens += weights.Newline
+			heuristicTokens += weights.Newline
 			i++
 
 		// ASCII whitespace often merges into adjacent tokens, especially in
 		// code, JSON, and Markdown indentation.
 		case cp == '\t':
-			tokens += weights.Tab
+			heuristicTokens += weights.Tab
 			i++
 		case cp == ' ':
-			tokens += weights.ASCIISpace
+			heuristicTokens += weights.ASCIISpace
 			i++
 
 		// CJK / fullwidth / general punctuation (，。、；：？！ etc.)
 		case (cp >= 0x2000 && cp <= 0x206F) || (cp >= 0x3000 && cp <= 0x303F) || (cp >= 0xFF00 && cp <= 0xFFEF):
-			tokens += weights.CJKPunctuation
+			heuristicTokens += weights.CJKPunctuation
 			i++
 
 		// ASCII punctuation (printable, non-alphanumeric)
 		case cp >= 0x21 && cp <= 0x7E && !unicode.IsLetter(cp) && !unicode.IsDigit(cp):
-			tokens += weights.ASCIIPunct
+			heuristicTokens += weights.ASCIIPunct
 			i++
 
 		// Everything else (emoji, rare symbols, …)
 		default:
-			tokens += weights.Other
+			heuristicTokens += weights.Other
 			i++
 		}
 	}
 
-	out := int(tokens*discount + 0.5)
+	out := int(bigramTokens+heuristicTokens*discount + 0.5)
 	if out == 0 && len(runes) > 0 {
 		return 1
 	}

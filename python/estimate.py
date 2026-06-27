@@ -44,30 +44,46 @@ def classify_text(text: str) -> str:
     return "mixed"
 
 
-def estimate(table: bytes | None, text: str, discount: float | dict = 1.0) -> float:
-    if isinstance(discount, dict):
-        cat = classify_text(text)
-        discount = discount.get(cat, discount.get("mixed", 1.0))
+def _scan(
+    table: bytes | None,
+    text: str,
+    bigrams: dict[str, int] | None,
+) -> tuple[float, float]:
+    """Return (bigram_tokens, heuristic_tokens) without applying discount.
+
+    bigram_tokens  — exact counts from the high-frequency word table.
+    heuristic_tokens — everything else (single-char table, Latin rules, etc.).
+    Keeping them separate lets callers apply discount only to the heuristic part.
+    """
     runes = list(text)
     n = len(runes)
-    tokens = 0.0
+    bigram_t = 0.0
+    heuristic_t = 0.0
 
     i = 0
     while i < n:
         ch = runes[i]
         cp = ord(ch)
 
-        # CJK Unified Ideographs (main block) — table lookup
+        # CJK Unified Ideographs (main block) — bigram → single-char table lookup
         if CJK_START <= cp <= CJK_END:
+            if bigrams and i + 1 < n:
+                next_cp = ord(runes[i + 1])
+                if CJK_START <= next_cp <= CJK_END:
+                    pair = ch + runes[i + 1]
+                    if pair in bigrams:
+                        bigram_t += bigrams[pair]
+                        i += 2
+                        continue
             if table is not None:
-                tokens += table[cp - CJK_START]
+                heuristic_t += table[cp - CJK_START]
             else:
-                tokens += 1.5
+                heuristic_t += 1.5
             i += 1
 
         # CJK Extension A / Compatibility Ideographs — fallback
         elif (0x3400 <= cp <= 0x4DBF) or (0xF900 <= cp <= 0xFAFF):
-            tokens += 1.5
+            heuristic_t += 1.5
             i += 1
 
         # Latin letter run — scale with length
@@ -76,17 +92,17 @@ def estimate(table: bytes | None, text: str, discount: float | dict = 1.0) -> fl
             while j < n and _is_latin(ord(runes[j])):
                 j += 1
             word_len = j - i
-            tokens += math.ceil(word_len / 4.0)
+            heuristic_t += math.ceil(word_len / 4.0)
             i = j
 
         # Hiragana / Katakana
         elif (0x3040 <= cp <= 0x309F) or (0x30A0 <= cp <= 0x30FF):
-            tokens += 1.0
+            heuristic_t += 1.0
             i += 1
 
         # Korean syllables
         elif 0xAC00 <= cp <= 0xD7AF:
-            tokens += 1.5
+            heuristic_t += 1.5
             i += 1
 
         # Digit run (Nd)
@@ -94,36 +110,59 @@ def estimate(table: bytes | None, text: str, discount: float | dict = 1.0) -> fl
             j = i + 1
             while j < n and _is_nd_digit(runes[j]):
                 j += 1
-            tokens += (j - i) * 0.5
+            heuristic_t += (j - i) * 0.5
             i = j
 
         # Newlines
         elif ch == "\n" or ch == "\r":
-            tokens += NEWLINE_TOKEN
+            heuristic_t += NEWLINE_TOKEN
             i += 1
 
         # ASCII whitespace often merges into adjacent tokens, especially in
         # code, JSON, and Markdown indentation.
         elif ch == "\t":
-            tokens += TAB_TOKEN
+            heuristic_t += TAB_TOKEN
             i += 1
         elif ch == " ":
-            tokens += ASCII_SPACE_TOKEN
+            heuristic_t += ASCII_SPACE_TOKEN
             i += 1
 
         # CJK / fullwidth / general punctuation
         elif (0x2000 <= cp <= 0x206F) or (0x3000 <= cp <= 0x303F) or (0xFF00 <= cp <= 0xFFEF):
-            tokens += 1.0
+            heuristic_t += 1.0
             i += 1
 
         # ASCII punctuation (printable, non-alphanumeric)
         elif 0x21 <= cp <= 0x7E and not ch.isalnum():
-            tokens += 0.7
+            heuristic_t += 0.7
             i += 1
 
         # Everything else (emoji, rare symbols, …)
         else:
-            tokens += 3.0
+            heuristic_t += 3.0
             i += 1
 
-    return tokens * discount
+    return bigram_t, heuristic_t
+
+
+def estimate(
+    table: bytes | None,
+    text: str,
+    discount: float | dict = 1.0,
+    bigrams: dict[str, int] | None = None,
+) -> float:
+    """Return estimated token count: bigram_tokens + heuristic_tokens * discount."""
+    if isinstance(discount, dict):
+        cat = classify_text(text)
+        discount = discount.get(cat, discount.get("mixed", 1.0))
+    bigram_t, heuristic_t = _scan(table, text, bigrams)
+    return bigram_t + heuristic_t * discount
+
+
+def estimate_split(
+    table: bytes | None,
+    text: str,
+    bigrams: dict[str, int] | None = None,
+) -> tuple[float, float]:
+    """Return (bigram_tokens, heuristic_tokens) for calibration use."""
+    return _scan(table, text, bigrams)

@@ -64,7 +64,7 @@ def build_tiktoken_table(model_key: str, encoding_name: str) -> bytes:
 # API path — Volcano Engine (doubao)
 # ---------------------------------------------------------------------------
 
-def build_volc_table(model_key: str, cfg: dict) -> bytes:
+def build_volc_table(model_key: str, cfg: dict, out_path: str = "") -> bytes:
     if not ARK_API_KEY:
         raise EnvironmentError("ARK_API_KEY is not set")
 
@@ -76,20 +76,50 @@ def build_volc_table(model_key: str, cfg: dict) -> bytes:
         "Content-Type":  "application/json",
     }
 
+    # Resume from checkpoint if it exists.
+    checkpoint_path = out_path + ".ckpt"
     table = bytearray(CJK_COUNT)
-    for i, cp in enumerate(range(CJK_START, CJK_END + 1)):
-        resp = requests.post(
-            endpoint,
-            headers=headers,
-            json={"model": model, "text": chr(cp)},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        total = resp.json()["total_tokens"]
+    start = 0
+    if os.path.exists(checkpoint_path):
+        ckpt = open(checkpoint_path, "rb").read()
+        n = len(ckpt)
+        table[:n] = ckpt
+        start = n
+        print(f"  {model_key}: resuming from {start}/{CJK_COUNT}")
+
+    backoff = interval
+    for i, cp in enumerate(range(CJK_START + start, CJK_END + 1), start=start):
+        while True:
+            try:
+                resp = requests.post(
+                    endpoint,
+                    headers=headers,
+                    json={"model": model, "text": chr(cp)},
+                    timeout=10,
+                )
+                if resp.status_code == 429:
+                    print(f"  {model_key}: 429 at {i}, backing off {backoff:.2f}s", flush=True)
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 30)
+                    continue
+                resp.raise_for_status()
+                backoff = interval
+                break
+            except Exception as e:
+                print(f"  {model_key}: error at {i} ({e}), retrying in {backoff:.1f}s", flush=True)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+
+        total = resp.json()["data"][0]["total_tokens"]
         table[i] = min(total, 255)
-        if i % 500 == 0:
-            print(f"  {model_key}: {i}/{CJK_COUNT}")
+        if (i + 1) % 500 == 0:
+            # Save checkpoint every 500 chars.
+            open(checkpoint_path, "wb").write(bytes(table[:i + 1]))
+            print(f"  {model_key}: {i + 1}/{CJK_COUNT}", flush=True)
         time.sleep(interval)
+
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
     return bytes(table)
 
 
@@ -136,17 +166,26 @@ def build_claude_table(model_key: str, cfg: dict) -> bytes:
 # Dispatch
 # ---------------------------------------------------------------------------
 
-def build_table(model_key: str) -> bytes:
+def build_table(model_key: str, out_path: str = "") -> bytes:
     if model_key in HF_MODELS:
         return build_hf_table(model_key, HF_MODELS[model_key])
     if model_key in TIKTOKEN_MODELS:
         return build_tiktoken_table(model_key, TIKTOKEN_MODELS[model_key])
     cfg = API_MODELS[model_key]
     if cfg["type"] == "volc":
-        return build_volc_table(model_key, cfg)
+        return build_volc_table(model_key, cfg, out_path)
     if cfg["type"] == "anthropic":
         return build_claude_table(model_key, cfg)
     raise ValueError(f"unknown model type for {model_key}")
+
+
+def _api_key_missing(model_key: str) -> bool:
+    cfg = API_MODELS.get(model_key, {})
+    if cfg.get("type") == "anthropic" and not ANTHROPIC_API_KEY:
+        return True
+    if cfg.get("type") == "volc" and not ARK_API_KEY:
+        return True
+    return False
 
 
 def main():
@@ -158,7 +197,10 @@ def main():
         if os.path.exists(out_path):
             print(f"[{key}] already exists, skipping")
             continue
-        table = build_table(key)
+        if _api_key_missing(key):
+            print(f"[{key}] skipped — no API key")
+            continue
+        table = build_table(key, out_path)
         with open(out_path, "wb") as f:
             f.write(table)
         print(f"[{key}] written {len(table)} bytes → {out_path}")

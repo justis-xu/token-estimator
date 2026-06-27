@@ -31,7 +31,7 @@ from config import (
     HF_MODELS, TIKTOKEN_MODELS, API_MODELS, ALL_MODELS,
     OUTPUT_DIR, HF_TOKEN, ARK_API_KEY, ANTHROPIC_API_KEY,
 )
-from estimate import estimate, classify_text
+from estimate import estimate_split, classify_text
 
 CATEGORIES = ("zh", "mixed", "en")
 
@@ -43,6 +43,23 @@ def load_table(model_key: str) -> bytes:
     path = os.path.join(OUTPUT_DIR, f"{model_key}.bin")
     with open(path, "rb") as f:
         return f.read()
+
+
+def load_bigrams(model_key: str) -> dict[str, int] | None:
+    path = os.path.join(OUTPUT_DIR, f"{model_key}.bigram")
+    if not os.path.exists(path):
+        return None
+    import struct
+    with open(path, "rb") as f:
+        data = f.read()
+    from config import CJK_START
+    n = struct.unpack(">I", data[:4])[0]
+    result = {}
+    for i in range(n):
+        off = 4 + i * 5
+        off1, off2, count = struct.unpack(">HHB", data[off:off + 5])
+        result[chr(CJK_START + off1) + chr(CJK_START + off2)] = count
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +97,7 @@ def real_count_volc(cfg: dict, text: str) -> int:
         json={"model": cfg["model"], "text": text}, timeout=15,
     )
     resp.raise_for_status()
-    return resp.json()["total_tokens"]
+    return resp.json()["data"][0]["total_tokens"]
 
 
 _claude_client = None
@@ -157,15 +174,21 @@ def calc_discount(model_key: str, corpus: list[dict]) -> dict[str, float]:
     cfg   = API_MODELS.get(model_key, {})
     interval = 1.0 / cfg["rps"] if cfg else 0.0
 
+    bigrams = load_bigrams(model_key)
+    if bigrams:
+        print(f"  [{model_key}] loaded {len(bigrams)} bigrams")
+
     ratios: dict[str, list[float]] = {c: [] for c in CATEGORIES}
     for entry in corpus:
         text = entry["text"]
         cat  = classify_text(text)
-        est  = estimate(table, text, discount=1.0)
-        if est <= 0:
-            continue
+        # Discount is only applied to the heuristic portion; bigram hits are not
+        # scaled. Calibrate as: discount = (real - bigram_tokens) / heuristic_tokens.
+        bigram_t, heuristic_t = estimate_split(table, text, bigrams=bigrams)
+        if heuristic_t <= 0:
+            continue  # text is entirely bigram-covered; discount is irrelevant
         real = real_count(model_key, text)
-        ratios[cat].append(real / est)
+        ratios[cat].append((real - bigram_t) / heuristic_t)
         if interval:
             time.sleep(interval)
 

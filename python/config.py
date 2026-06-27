@@ -29,7 +29,7 @@ API_MODELS = {
         "type":     "volc",
         "endpoint": "https://ark.cn-beijing.volces.com/api/v3/tokenization",
         "model":    "doubao-seed-1-6-250615",
-        "rps":      10,
+        "rps":      40,
     },
     "claude": {
         "type":    "anthropic",

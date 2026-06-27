@@ -1,49 +1,74 @@
 """
 Scrape a mixed Chinese corpus for BPE discount calibration.
 
-Sources:
-  1. Chinese Wikipedia random summaries (150 articles) — formal Chinese prose
-  2. English Wikipedia random summaries (50 articles) — calibrates English estimation
-  3. Tech text: 少数派 RSS → V2EX → 阮一峰 (cascade fallback, 40 entries target)
-  4. Hand-written message samples (30 entries) — realistic prompt/response formats
+Sources (all parallel):
+  Wikipedia: zh (1000 quality articles ≥500 chars) + en (50)
+  News RSS:  人民日报(2) 中新社 环球时报 凤凰 新浪 光明日报 财新
+  Tech RSS:  少数派 虎嗅 36kr 爱范儿 极客公园 InfoQ开源中国 V2EX 阮一峰
+  Manual:    ~52 hand-written prompt/response samples
 
-Output: output/corpus.jsonl
+Output: output/corpus.jsonl  (incremental, resumable)
 """
 
 import json
 import os
 import re
 import time
+import threading
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from config import OUTPUT_DIR
 
-V2EX_API     = "https://www.v2ex.com/api/topics/hot.json"
-RUANYF_ATOM  = "https://www.ruanyifeng.com/blog/atom.xml"
-SSPAI_RSS    = "https://sspai.com/feed"
+ZH_TEXT_CAP  = 8000
+EN_TEXT_CAP  = 2000
+WIKI_MIN_LEN = 500
 
-# Wikipedia main API — batch 10 random extracts per request, much friendlier on rate limits.
-WIKI_API = "https://{lang}.wikipedia.org/w/api.php"
-WIKI_BATCH = 10  # grnlimit max = 10
+WIKI_API   = "https://{lang}.wikipedia.org/w/api.php"
+WIKI_BATCH = 10
+V2EX_API   = "https://www.v2ex.com/api/topics/hot.json"
+RUANYF_ATOM = "https://www.ruanyifeng.com/blog/atom.xml"
+
+# All simple RSS feeds: (url, source_name, max_items)
+RSS_FEEDS = [
+    # --- news ---
+    ("http://www.people.com.cn/rss/politics.xml",        "peopledaily",  40),
+    ("http://www.people.com.cn/rss/tech.xml",            "peopledaily",  40),
+    ("http://www.chinanews.com.cn/rss/scroll-news.xml",  "chinanews",    50),
+    ("https://www.globaltimes.cn/rss/outbrain.xml",      "globaltimes",  30),
+    ("https://news.ifeng.com/rss/index_news.xml",        "ifeng",        40),
+    ("http://rss.sina.com.cn/news/china/focus15.xml",    "sina_news",    40),
+    ("http://www.gmw.cn/rss/",                           "gmw",          30),
+    ("https://www.caixin.com/rss/",                      "caixin",       30),
+    # --- tech ---
+    ("https://sspai.com/feed",                           "sspai",        30),
+    ("https://www.huxiu.com/rss/0.xml",                  "huxiu",        30),
+    ("https://36kr.com/feed",                            "36kr",         30),
+    ("https://www.ifanr.com/feed",                       "ifanr",        30),
+    ("https://www.geekpark.net/rss",                     "geekpark",     30),
+    ("https://www.infoq.cn/feed",                        "infoq",        30),
+    ("https://www.oschina.net/news/rss",                 "oschina",      30),
+]
 
 
 # ---------------------------------------------------------------------------
 # Source 1 & 2: Wikipedia (Chinese + English) — batch via action=query
 # ---------------------------------------------------------------------------
 
-def fetch_wikipedia(n: int, lang: str = "zh") -> list[dict]:
+def fetch_wikipedia(n: int, lang: str = "zh", writer=None) -> list[dict]:
+    """Fetch n Wikipedia articles, writing incrementally if writer is provided."""
     source = "zh_wikipedia" if lang == "zh" else "en_wikipedia"
     url = WIKI_API.format(lang=lang)
+    min_len = WIKI_MIN_LEN if lang == "zh" else 80
     params = {
-        "action":      "query",
-        "generator":   "random",
+        "action":       "query",
+        "generator":    "random",
         "grnnamespace": 0,
-        "grnlimit":    WIKI_BATCH,
-        "prop":        "extracts",
-        "exintro":     True,
-        "explaintext": True,
-        "exlimit":     WIKI_BATCH,
-        "format":      "json",
+        "grnlimit":     WIKI_BATCH,
+        "prop":         "extracts",
+        "explaintext":  True,
+        "exlimit":      WIKI_BATCH,
+        "format":       "json",
     }
     headers = {"User-Agent": "token-estimator/1.0 (calibration corpus)"}
     results = []
@@ -58,11 +83,14 @@ def fetch_wikipedia(n: int, lang: str = "zh") -> list[dict]:
                 continue
             r.raise_for_status()
             backoff = 1.0
-            pages = r.json().get("query", {}).get("pages", {})
-            for page in pages.values():
+            cap = EN_TEXT_CAP if lang == "en" else ZH_TEXT_CAP
+            for page in r.json().get("query", {}).get("pages", {}).values():
                 text = (page.get("extract") or "").strip()
-                if text and len(text) > 80:
-                    results.append({"source": source, "text": text[:1200]})
+                if text and len(text) >= min_len:
+                    item = {"source": source, "text": text[:cap]}
+                    results.append(item)
+                    if writer:
+                        writer(item)
             print(f"  {source}: {len(results)}/{n}")
         except Exception as e:
             print(f"  {source}: error {e}")
@@ -71,79 +99,52 @@ def fetch_wikipedia(n: int, lang: str = "zh") -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Source 3: Tech text cascade — 少数派 → V2EX → 阮一峰
+# Generic RSS fetcher
 # ---------------------------------------------------------------------------
 
-def fetch_sspai(n: int) -> list[dict]:
-    """少数派 RSS — reliable Chinese tech/lifestyle articles."""
+def fetch_rss(url: str, source: str, n: int) -> list[dict]:
+    """Fetch up to n items from an RSS/Atom feed."""
     results = []
     try:
-        r = requests.get(SSPAI_RSS, timeout=15,
+        r = requests.get(url, timeout=15,
                          headers={"User-Agent": "token-estimator/1.0"})
         r.raise_for_status()
         root = ET.fromstring(r.content)
-        for item in root.findall(".//item")[:n]:
-            title   = item.findtext("title") or ""
-            content = item.findtext("description") or item.findtext("content:encoded") or ""
-            content = re.sub(r"<[^>]+>", "", content)
-            content = re.sub(r"\s{3,}", "\n\n", content)
-            text = (title.strip() + "\n\n" + content.strip()).strip()
+        # RSS <item> or Atom <entry>
+        items = root.findall(".//item") or root.findall(
+            ".//{http://www.w3.org/2005/Atom}entry")
+        for item in items[:n]:
+            title = (item.findtext("title") or
+                     item.findtext("{http://www.w3.org/2005/Atom}title") or "")
+            body  = (item.findtext("description") or
+                     item.findtext("{http://www.w3.org/2005/Atom}content") or
+                     item.findtext("{http://www.w3.org/2005/Atom}summary") or "")
+            body  = re.sub(r"<[^>]+>", "", body)
+            body  = re.sub(r"\s{3,}", "\n\n", body)
+            text  = (title.strip() + "\n\n" + body.strip()).strip()
             if text and len(text) > 80:
-                results.append({"source": "sspai", "text": text[:1000]})
+                results.append({"source": source, "text": text[:ZH_TEXT_CAP]})
+        print(f"  {source}: {len(results)} entries")
     except Exception as e:
-        print(f"  sspai error: {e}")
+        print(f"  {source} ({url}): {e}")
     return results
 
 
 def fetch_v2ex(n: int) -> list[dict]:
     results = []
     try:
-        r = requests.get(
-            V2EX_API, timeout=15,
-            headers={"User-Agent": "token-estimator/1.0",
-                     "Referer": "https://www.v2ex.com/"},
-        )
+        r = requests.get(V2EX_API, timeout=15,
+                         headers={"User-Agent": "token-estimator/1.0",
+                                  "Referer": "https://www.v2ex.com/"})
         r.raise_for_status()
         for topic in r.json()[:n]:
             text = (topic.get("title", "") + "\n" + topic.get("content", "")).strip()
             if text:
-                results.append({"source": "v2ex", "text": text[:800]})
+                results.append({"source": "v2ex", "text": text[:ZH_TEXT_CAP]})
+        print(f"  v2ex: {len(results)} entries")
     except Exception as e:
-        print(f"  v2ex error: {e}")
+        print(f"  v2ex: {e}")
     return results
-
-
-def fetch_ruanyifeng(n: int) -> list[dict]:
-    results = []
-    try:
-        r = requests.get(RUANYF_ATOM, timeout=15,
-                         headers={"User-Agent": "token-estimator/1.0"})
-        r.raise_for_status()
-        root = ET.fromstring(r.content)
-        ns = {"a": "http://www.w3.org/2005/Atom"}
-        for entry in root.findall(".//a:entry", ns)[:n]:
-            title   = entry.findtext("a:title", default="", namespaces=ns)
-            content = entry.findtext("a:content", default="", namespaces=ns) \
-                or entry.findtext("a:summary", default="", namespaces=ns)
-            content = re.sub(r"<[^>]+>", "", content or "")
-            text = (title + "\n" + content).strip()
-            if text:
-                results.append({"source": "ruanyifeng", "text": text[:800]})
-    except Exception as e:
-        print(f"  ruanyifeng error: {e}")
-    return results
-
-
-def fetch_tech(n: int = 40) -> list[dict]:
-    """少数派 → V2EX → 阮一峰 cascade; warn if all fail."""
-    results = fetch_sspai(n)
-    if len(results) < n:
-        results.extend(fetch_v2ex(n - len(results)))
-    if len(results) < n:
-        results.extend(fetch_ruanyifeng(n - len(results)))
-    if not results:
-        print("  WARNING: all tech sources failed; corpus relies on Wikipedia + manual only.")
-    return results[:n]
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +355,48 @@ def chunk_text(text: str, max_tokens: int, model: str = "qwen") -> list[str]:
         chunks.append(" ".join(current))
     return chunks
 ```"""},
+
+    # --- additional pure-Chinese samples for zh calibration ---
+    {"source": "manual", "type": "zh_prose",
+     "text": "人工智能技术的快速发展正在深刻改变各行各业的运作方式。从制造业的智能化生产到医疗领域的辅助诊断，再到金融行业的风险控制，大模型的应用已经渗透到经济社会的方方面面。然而，与此同时，关于数据安全、隐私保护和算法偏见的担忧也日益凸显，如何在技术创新与伦理监管之间找到平衡，成为各国政府和企业面临的共同挑战。"},
+    {"source": "manual", "type": "zh_prose",
+     "text": "在城市化进程不断加快的背景下，交通拥堵问题愈发严峻。以北京、上海为代表的特大城市，每逢早晚高峰，主干道上车辆绵延数公里，通勤时间动辄超过一小时。为此，各地相继推出限号出行、错峰上下班等措施，同时加大对公共交通基础设施的投入，力图从源头上缓解道路压力。"},
+    {"source": "manual", "type": "zh_prose",
+     "text": "中医药文化是中华民族几千年来与疾病斗争的智慧结晶。针灸、推拿、中药方剂等传统疗法，经过历代医家的实践积累与理论总结，形成了一套独特的理论体系。近年来，随着国际社会对传统医学的重视程度不断提升，中医药正走向世界舞台，在全球卫生治理中发挥越来越重要的作用。"},
+    {"source": "manual", "type": "zh_prose",
+     "text": "量子计算是当前信息技术领域最受关注的前沿方向之一。不同于经典计算机依赖比特的0和1进行运算，量子计算机利用量子叠加和量子纠缠等特性，能够在特定问题上实现指数级的加速。目前，谷歌、IBM、百度等科技巨头均已投入大量资源开展量子计算研究，预计在未来十年内将在密码学、药物研发等领域取得突破性进展。"},
+    {"source": "manual", "type": "zh_prose",
+     "text": "乡村振兴战略实施以来，农村面貌发生了翻天覆地的变化。硬化道路通到了家门口，自来水和天然气进入了千家万户，电商平台让农产品走出了大山。越来越多的年轻人选择返乡创业，带回了资金、技术和新理念，为农村经济注入了新的活力。与此同时，乡村旅游、民宿经济等新业态蓬勃兴起，成为农民增收的重要渠道。"},
+    {"source": "manual", "type": "zh_dialogue",
+     "text": "用户：我的孩子今年上小学三年级，最近数学成绩一直在下滑，不知道该怎么办。\n\n助手：小学三年级数学成绩下滑是很常见的情况，这个阶段数学从简单的加减法过渡到了乘除和分数，对很多孩子来说是一个重要的分水岭。建议您先和孩子沟通，了解他在哪些具体知识点上感到困难，是乘法口诀、应用题还是几何图形。找准薄弱点之后，可以每天拿出30分钟针对性练习，配合生活中的实际场景帮助理解，比如买东西找零、分蛋糕等。"},
+    {"source": "manual", "type": "zh_dialogue",
+     "text": "用户：公司要求我们用大模型做一个内部知识库问答系统，但我不知道从哪里开始。\n\n助手：搭建内部知识库问答系统一般分四个步骤。第一步是文档处理，把公司的 PDF、Word、Wiki 等文档解析成纯文本，按段落或页面切分成适当大小的块。第二步是向量化，用嵌入模型（比如 text-embedding-3-small 或 bge-m3）把文本块转成向量，存入向量数据库如 Milvus 或 Chroma。第三步是检索，用户提问时先向量化问题，检索最相似的 K 个文本块作为上下文。第四步是生成，把问题和检索到的上下文拼成 prompt，调用大模型生成回答。"},
+    {"source": "manual", "type": "zh_news",
+     "text": "国家统计局今日发布数据显示，上半年全国居民消费价格指数（CPI）同比上涨0.3%，工业生产者出厂价格指数（PPI）同比下降2.1%。专家分析认为，当前物价总体保持平稳，但内需偏弱的问题仍需关注。国家发展改革委表示，下半年将继续实施积极的财政政策和稳健的货币政策，综合运用多种手段提振居民消费信心，推动经济持续回升向好。"},
+    {"source": "manual", "type": "zh_news",
+     "text": "本市今日召开城市更新工作推进会议，会议部署了老旧小区改造、背街小巷整治、历史文化街区保护等重点任务。市住房和城乡建设局局长在会上表示，今年计划完成800个老旧小区的改造工作，惠及居民约15万户。改造内容包括屋顶防水、外墙保温、加装电梯、完善停车设施及绿化提升等，确保改造后居民生活质量得到切实提升。"},
+    {"source": "manual", "type": "zh_technical",
+     "text": "微服务架构在提升系统可扩展性的同时，也带来了服务治理的复杂性。在高并发场景下，服务间的调用链路可能涉及数十个微服务，一旦某个服务出现延迟或故障，容易引发连锁反应，导致整个系统雪崩。因此，在设计微服务架构时，必须重视熔断机制、限流降级和链路追踪等可靠性手段。常用的解决方案包括 Sentinel、Hystrix 等熔断框架，以及 SkyWalking、Jaeger 等分布式追踪系统。"},
+    {"source": "manual", "type": "zh_technical",
+     "text": "数据库索引是提升查询性能的核心手段，但索引并非越多越好。每个索引都会占用额外的磁盘空间，并在数据写入时带来维护开销。合理的索引策略应基于实际的查询模式：对于高频的等值查询，B树索引是首选；对于范围查询，需要考虑索引的选择性；对于多列查询，联合索引的列顺序至关重要，应将选择性高的列放在前面。此外，定期分析慢查询日志，找出缺失索引的高耗时SQL，是数据库调优的重要环节。"},
+    {"source": "manual", "type": "zh_prose",
+     "text": '深海探测是人类认识地球的重要途径。海洋覆盖地球表面约71%的面积，平均深度超过3600米，但至今人类直接探索过的海底面积不足5%。深海环境极端恶劣，高压、低温、黑暗使得探测设备的研发面临巨大挑战。近年来，我国自主研发的"奋斗者"号全海深载人潜水器成功坐底马里亚纳海沟，刷新了中国载人深潜记录，标志着我国在深海探测领域取得了重大突破。'},
+    {"source": "manual", "type": "zh_prose",
+     "text": '阅读是获取知识、拓展视野的重要方式，但在信息爆炸的时代，如何高效阅读成为一项值得学习的技能。主题阅读法是一种高效的策略：围绕某一主题，同时阅读多本相关书籍，在对比和综合中形成系统性认知。笔记法同样重要，费曼技术建议用自己的话解释所学内容，通过"教学"来检验真正的理解程度。此外，番茄工作法可以帮助保持专注，避免长时间阅读带来的疲劳和注意力分散。'},
+    {"source": "manual", "type": "zh_technical",
+     "text": "大语言模型的推理效率是制约其大规模部署的关键瓶颈。KV Cache 技术通过缓存注意力层的键值矩阵，避免重复计算，显著降低了自回归解码的延迟。量化技术（INT8、INT4）通过降低权重精度来压缩模型大小和加速推理，但可能带来一定的精度损失。投机解码（Speculative Decoding）利用小模型预生成候选序列，再由大模型批量验证，在保证输出质量的前提下大幅提升吞吐量。这些优化技术的组合使用，使得在消费级硬件上部署百亿参数模型成为可能。"},
+    {"source": "manual", "type": "zh_dialogue",
+     "text": "用户：最近看新闻说美联储要降息，这对我们普通人有什么影响？\n\n助手：美联储降息对普通人的影响主要体现在几个方面。首先是贷款成本，降息后银行贷款利率通常会跟着下降，如果你有房贷或车贷，再融资的成本会降低；如果你计划购房，月供压力也会有所减轻。其次是储蓄收益，存款利率会随之下降，存在银行的钱收益会减少，这可能促使部分人把资金转向股市或其他投资渠道。第三是汇率，降息通常会导致美元走弱，如果你有美元资产或涉及跨境业务，需要关注汇率变动带来的风险。"},
+    {"source": "manual", "type": "zh_prose",
+     "text": "食品安全是关系人民群众身体健康和生命安全的重大民生问题。近年来，我国持续完善食品安全法律法规体系，建立了从农田到餐桌的全链条监管机制。农业农村部加强农药残留、兽药残留的监测抽查，市场监管总局对食品生产加工环节实施严格的许可制度，海关对进口食品实行批批检验。与此同时，社会共治的理念逐步深入人心，消费者投诉举报渠道不断畅通，企业主体责任意识不断增强。"},
+    {"source": "manual", "type": "zh_technical",
+     "text": "容器化技术的普及极大地简化了软件的部署和运维工作。Docker 通过将应用程序及其依赖打包成镜像，实现了「一次构建，到处运行」的目标，解决了不同环境之间的兼容性问题。Kubernetes 则在此基础上提供了容器编排能力，自动处理容器的调度、扩缩容、健康检查和故障恢复。在实际生产环境中，通常还需要配合 Helm 进行包管理、Prometheus 进行监控告警、Istio 进行服务网格治理，共同构成完整的云原生技术栈。"},
+    {"source": "manual", "type": "zh_prose",
+     "text": "非物质文化遗产是一个民族文化身份和历史记忆的重要载体。剪纸、京剧、昆曲、皮影戏……这些凝聚着先人智慧和审美情趣的艺术形式，正面临着传承断层的困境。如何在现代社会中激活传统文化的生命力，是摆在我们面前的重要课题。一些成功的探索令人振奋：故宫文创将传统元素与现代设计相融合，让古老的文物以崭新的面貌走进年轻人的日常生活；一些非遗传承人借助短视频平台，让更多人了解和爱上了传统手工艺。"},
+    {"source": "manual", "type": "zh_dialogue",
+     "text": "用户：我想用Python写一个爬虫，抓取某电商平台的商品价格，但不知道从哪里开始。\n\n助手：写一个基础的价格爬虫，可以分三步走。第一步，分析目标页面。用浏览器打开商品页，按F12打开开发者工具，切到Network标签，刷新页面，看价格数据是直接在HTML里，还是通过XHR接口返回的JSON。第二步，根据情况选择工具。如果是静态HTML，用requests+BeautifulSoup就够了；如果是动态渲染的JavaScript页面，需要用Selenium或Playwright模拟浏览器。第三步，解析数据并存储。找到价格元素的CSS选择器或XPath，提取数值后存入CSV或数据库。注意要设置合理的请求间隔，避免被封IP。"},
+    {"source": "manual", "type": "zh_prose",
+     "text": "碳达峰碳中和是我国应对气候变化、推动绿色发展的重大战略决策。实现双碳目标，需要能源结构、产业结构、交通运输、城乡建设等多个领域的系统性变革。可再生能源是替代化石燃料的核心路径，风电、光伏装机规模的持续扩大，正在重塑我国的能源版图。储能技术的突破至关重要，只有解决了可再生能源间歇性、波动性的问题，才能真正实现对传统电力系统的替代。此外，碳捕获与封存技术、氢能的规模化应用也是实现深度脱碳不可或缺的手段。"},
 ]
 
 
@@ -365,35 +408,97 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     out_path = os.path.join(OUTPUT_DIR, "corpus.jsonl")
 
-    corpus: list[dict] = []
+    # --- resume: count existing entries per source ---
+    have: dict[str, int] = {}
+    if os.path.exists(out_path):
+        with open(out_path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    src = json.loads(line).get("source", "?")
+                    have[src] = have.get(src, 0) + 1
+                except Exception:
+                    pass
+        if have:
+            print(f"Resuming — found {sum(have.values())} existing entries: {have}")
 
-    print("Fetching Chinese Wikipedia (150 articles) ...")
-    zh_wiki = fetch_wikipedia(150, lang="zh")
-    corpus.extend(zh_wiki)
-    print(f"  got {len(zh_wiki)} zh-wikipedia articles")
+    # thread-safe incremental writer
+    _lock = threading.Lock()
+    _fh   = open(out_path, "a", encoding="utf-8")
 
-    print("Fetching English Wikipedia (50 articles) ...")
-    en_wiki = fetch_wikipedia(50, lang="en")
-    corpus.extend(en_wiki)
-    print(f"  got {len(en_wiki)} en-wikipedia articles")
+    def write(item: dict) -> None:
+        with _lock:
+            _fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+            _fh.flush()
 
-    print("Fetching tech text (少数派 → V2EX → 阮一峰, target 40) ...")
-    tech = fetch_tech(40)
-    corpus.extend(tech)
-    by_src = {}
-    for x in tech:
-        by_src[x["source"]] = by_src.get(x["source"], 0) + 1
-    print(f"  got {len(tech)} entries: {by_src}")
+    def write_all(items: list[dict]) -> None:
+        for item in items:
+            write(item)
 
-    corpus.extend(MANUAL_SAMPLES)
-    print(f"  added {len(MANUAL_SAMPLES)} manual samples")
+    # build task list
+    tasks: list[tuple] = []  # (fn, *args)
 
-    total_chars = sum(len(x["text"]) for x in corpus)
-    with open(out_path, "w", encoding="utf-8") as f:
-        for item in corpus:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    # Wikipedia zh (1000, min 500 chars)
+    zh_need = max(0, 1000 - have.get("zh_wikipedia", 0))
+    if zh_need > 0:
+        tasks.append(("wiki_zh", zh_need))
+    # Wikipedia en (50)
+    en_need = max(0, 50 - have.get("en_wikipedia", 0))
+    if en_need > 0:
+        tasks.append(("wiki_en", en_need))
 
-    print(f"\ncorpus.jsonl: {len(corpus)} entries, {total_chars:,} chars → {out_path}")
+    # RSS feeds — each source independent
+    for url, source, n in RSS_FEEDS:
+        need = max(0, n - have.get(source, 0))
+        if need > 0:
+            tasks.append(("rss", url, source, need))
+
+    # V2EX (JSON API)
+    if have.get("v2ex", 0) < 30:
+        tasks.append(("v2ex", 30 - have.get("v2ex", 0)))
+
+    # 阮一峰 Atom
+    if have.get("ruanyifeng", 0) < 20:
+        tasks.append(("ruanyifeng", 20 - have.get("ruanyifeng", 0)))
+
+    # manual samples (one-shot)
+    if have.get("manual", 0) == 0:
+        write_all(MANUAL_SAMPLES)
+        print(f"  manual: wrote {len(MANUAL_SAMPLES)} samples")
+
+    print(f"\nRunning {len(tasks)} source tasks in parallel ...\n")
+
+    def run_task(task):
+        kind = task[0]
+        if kind == "wiki_zh":
+            fetch_wikipedia(task[1], "zh", write)
+        elif kind == "wiki_en":
+            fetch_wikipedia(task[1], "en", write)
+        elif kind == "rss":
+            _, url, source, n = task
+            write_all(fetch_rss(url, source, n))
+        elif kind == "v2ex":
+            write_all(fetch_v2ex(task[1]))
+        elif kind == "ruanyifeng":
+            write_all(fetch_rss(RUANYF_ATOM, "ruanyifeng", task[1]))
+
+    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        futures = {pool.submit(run_task, t): t for t in tasks}
+        for f in as_completed(futures):
+            if f.exception():
+                print(f"  task {futures[f]} error: {f.exception()}")
+
+    _fh.close()
+
+    # final stats
+    count, total = 0, 0
+    with open(out_path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                count += 1
+                total += len(json.loads(line).get("text", ""))
+            except Exception:
+                pass
+    print(f"\ncorpus.jsonl: {count} entries, {total:,} chars → {out_path}")
 
 
 if __name__ == "__main__":
