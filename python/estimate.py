@@ -9,6 +9,8 @@ char-class handling makes the calibrated discount wrong. The char classes,
 ranges, and per-class weights here must match estimator.go exactly.
 """
 
+from __future__ import annotations
+
 import math
 import unicodedata
 

@@ -58,6 +58,16 @@ def write_golden(
     return total
 
 
+def _api_key_missing(model_key: str) -> bool:
+    from config import API_MODELS, ARK_API_KEY, ANTHROPIC_API_KEY
+    cfg = API_MODELS.get(model_key, {})
+    if cfg.get("type") == "anthropic" and not ANTHROPIC_API_KEY:
+        return True
+    if cfg.get("type") == "volc" and not ARK_API_KEY:
+        return True
+    return False
+
+
 def main():
     corpus_path = os.path.join(OUTPUT_DIR, "corpus.jsonl")
     if not os.path.exists(corpus_path):
@@ -70,8 +80,15 @@ def main():
             if line:
                 corpus.append(json.loads(line))
 
+    active_models = []
+    for key in ALL_MODELS:
+        if _api_key_missing(key):
+            print(f"[{key}] skipped — no API key")
+        else:
+            active_models.append(key)
+
     out_path = os.path.join(OUTPUT_DIR, "golden.jsonl")
-    total = write_golden(corpus, ALL_MODELS, out_path)
+    total = write_golden(corpus, active_models, out_path)
 
     print(f"\ngolden.jsonl: {total} entries → {out_path}")
 

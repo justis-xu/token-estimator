@@ -2,11 +2,18 @@
 Calculate per-model discount coefficients from corpus.jsonl.
 
 GLOBAL multiplier approach: discount corrects the *whole* heuristic estimate,
-not just the CJK part. For each model:
+not just the CJK part. For each model we collect ratios:
 
-    discount = mean( real_tokens / estimate(table, text, discount=1.0) )
+    r_i = real_tokens_i / estimate(table, text_i, discount=1.0)
 
-where estimate() mirrors go/estimator.go exactly (see estimate.py).
+and set:
+
+    discount = percentile(ratios, DISCOUNT_PERCENTILE)
+
+Using the 75th percentile (rather than the mean) gives a conservative bias:
+~75% of texts will be slightly over-estimated, which is the safe direction for
+context-compression use cases (under-estimation causes context-limit overruns).
+
 Output: output/config.json
 
 Usage:
@@ -124,6 +131,20 @@ def real_count(model_key: str, text: str) -> int:
 # Main
 # ---------------------------------------------------------------------------
 
+# 75th percentile: ~75% of texts will be over-estimated (safe for context compression).
+DISCOUNT_PERCENTILE = 75
+
+
+def _percentile(data: list[float], p: int) -> float:
+    """Return the p-th percentile of data (0–100)."""
+    if not data:
+        return 1.0
+    sorted_data = sorted(data)
+    k = (len(sorted_data) - 1) * p / 100
+    lo, hi = int(k), min(int(k) + 1, len(sorted_data) - 1)
+    return sorted_data[lo] + (sorted_data[hi] - sorted_data[lo]) * (k - lo)
+
+
 def calc_discount(model_key: str, corpus: list[dict]) -> float:
     table = load_table(model_key)
     cfg   = API_MODELS.get(model_key, {})
@@ -142,7 +163,10 @@ def calc_discount(model_key: str, corpus: list[dict]) -> float:
 
     if not ratios:
         return 1.0
-    return sum(ratios) / len(ratios)
+    mean_val = sum(ratios) / len(ratios)
+    p75_val  = _percentile(ratios, DISCOUNT_PERCENTILE)
+    print(f"    mean={mean_val:.4f}  p75={p75_val:.4f}  n={len(ratios)}")
+    return p75_val
 
 
 def main():
@@ -158,15 +182,50 @@ def main():
                 corpus.append(json.loads(line))
     print(f"corpus: {len(corpus)} entries")
 
+    # Load existing discounts so we can preserve values for skipped models.
+    existing: dict[str, float] = {}
+    existing_path = os.path.join(OUTPUT_DIR, "config.json")
+    if os.path.exists(existing_path):
+        try:
+            raw = json.loads(open(existing_path).read())
+            existing = {k: v for k, v in raw.items() if isinstance(v, (int, float))}
+            print(f"loaded {len(existing)} existing discounts from config.json")
+        except Exception:
+            pass
+
+    def _api_key_missing(model_key: str) -> bool:
+        cfg = API_MODELS.get(model_key, {})
+        if cfg.get("type") == "anthropic" and not ANTHROPIC_API_KEY:
+            return True
+        if cfg.get("type") == "volc" and not ARK_API_KEY:
+            return True
+        return False
+
     discounts: dict[str, float] = {}
+    skipped: list[str] = []
     for key in ALL_MODELS:
+        if _api_key_missing(key):
+            if key in existing:
+                discounts[key] = existing[key]
+                print(f"\n[{key}] skipped (no API key) — kept existing {discounts[key]:.4f}")
+            else:
+                print(f"\n[{key}] skipped (no API key) — no existing value, will be covered by default")
+            skipped.append(key)
+            continue
         print(f"\n[{key}] calculating discount ...")
         d = calc_discount(key, corpus)
         discounts[key] = round(d, 4)
         print(f"  {key}: {discounts[key]:.4f}")
 
-    # default = most conservative (largest) so unknown models never undercount
-    discounts["default"] = max(discounts.values())
+    if skipped:
+        print(f"\nskipped models (no API key): {skipped}")
+
+    # default = most conservative (largest) among computed models,
+    # so unknown models never undercount.
+    computed = [v for k, v in discounts.items() if k not in skipped]
+    if not computed:
+        computed = list(discounts.values())
+    discounts["default"] = max(computed) if computed else 1.0
     print(f"\ndefault (most conservative): {discounts['default']:.4f}")
 
     out_path = os.path.join(OUTPUT_DIR, "config.json")
