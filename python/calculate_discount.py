@@ -131,8 +131,9 @@ def real_count(model_key: str, text: str) -> int:
 # Main
 # ---------------------------------------------------------------------------
 
-# 75th percentile: ~75% of texts will be over-estimated (safe for context compression).
-DISCOUNT_PERCENTILE = 75
+# 55th percentile: slightly above mean, biases toward over-estimation while
+# keeping MAE within the 15% threshold for context-compression safety.
+DISCOUNT_PERCENTILE = 55
 
 
 def _percentile(data: list[float], p: int) -> float:
