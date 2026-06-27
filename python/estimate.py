@@ -31,7 +31,23 @@ def _is_nd_digit(ch: str) -> bool:
     return unicodedata.category(ch) == "Nd"
 
 
-def estimate(table: bytes | None, text: str, discount: float = 1.0) -> float:
+def classify_text(text: str) -> str:
+    """Return 'zh', 'en', or 'mixed' based on CJK character ratio."""
+    if not text:
+        return "mixed"
+    cjk = sum(1 for c in text if CJK_START <= ord(c) <= CJK_END)
+    ratio = cjk / len(text)
+    if ratio >= 0.6:
+        return "zh"
+    if ratio <= 0.1:
+        return "en"
+    return "mixed"
+
+
+def estimate(table: bytes | None, text: str, discount: float | dict = 1.0) -> float:
+    if isinstance(discount, dict):
+        cat = classify_text(text)
+        discount = discount.get(cat, discount.get("mixed", 1.0))
     runes = list(text)
     n = len(runes)
     tokens = 0.0

@@ -1,8 +1,14 @@
 """
-Calculate per-model discount coefficients from corpus.jsonl.
+Calculate per-model, per-category discount coefficients from corpus.jsonl.
 
-GLOBAL multiplier approach: discount corrects the *whole* heuristic estimate,
-not just the CJK part. For each model we collect ratios:
+Each corpus entry is classified into one of three text categories based on
+the fraction of CJK characters in the text:
+
+    zh    — CJK ratio >= 0.6   (mostly Chinese)
+    mixed — 0.1 < CJK ratio < 0.6
+    en    — CJK ratio <= 0.1   (mostly English / code)
+
+For each (model, category) pair we collect ratios:
 
     r_i = real_tokens_i / estimate(table, text_i, discount=1.0)
 
@@ -10,11 +16,8 @@ and set:
 
     discount = percentile(ratios, DISCOUNT_PERCENTILE)
 
-Using the 75th percentile (rather than the mean) gives a conservative bias:
-~75% of texts will be slightly over-estimated, which is the safe direction for
-context-compression use cases (under-estimation causes context-limit overruns).
-
-Output: output/config.json
+Output: output/config.json  —  schema:
+    {"qwen": {"zh": 0.71, "mixed": 0.76, "en": 0.82}, ...}
 
 Usage:
   ARK_API_KEY=... ANTHROPIC_API_KEY=... HF_TOKEN=... python calculate_discount.py
@@ -28,7 +31,9 @@ from config import (
     HF_MODELS, TIKTOKEN_MODELS, API_MODELS, ALL_MODELS,
     OUTPUT_DIR, HF_TOKEN, ARK_API_KEY, ANTHROPIC_API_KEY,
 )
-from estimate import estimate
+from estimate import estimate, classify_text
+
+CATEGORIES = ("zh", "mixed", "en")
 
 # ---------------------------------------------------------------------------
 # Load tables
@@ -146,28 +151,31 @@ def _percentile(data: list[float], p: int) -> float:
     return sorted_data[lo] + (sorted_data[hi] - sorted_data[lo]) * (k - lo)
 
 
-def calc_discount(model_key: str, corpus: list[dict]) -> float:
+def calc_discount(model_key: str, corpus: list[dict]) -> dict[str, float]:
+    """Return {"zh": float, "mixed": float, "en": float} discount per text category."""
     table = load_table(model_key)
     cfg   = API_MODELS.get(model_key, {})
     interval = 1.0 / cfg["rps"] if cfg else 0.0
 
-    ratios = []
+    ratios: dict[str, list[float]] = {c: [] for c in CATEGORIES}
     for entry in corpus:
         text = entry["text"]
-        est = estimate(table, text, discount=1.0)
+        cat  = classify_text(text)
+        est  = estimate(table, text, discount=1.0)
         if est <= 0:
             continue
         real = real_count(model_key, text)
-        ratios.append(real / est)
+        ratios[cat].append(real / est)
         if interval:
             time.sleep(interval)
 
-    if not ratios:
-        return 1.0
-    mean_val = sum(ratios) / len(ratios)
-    p75_val  = _percentile(ratios, DISCOUNT_PERCENTILE)
-    print(f"    mean={mean_val:.4f}  p75={p75_val:.4f}  n={len(ratios)}")
-    return p75_val
+    result: dict[str, float] = {}
+    for cat in CATEGORIES:
+        rs = ratios[cat]
+        result[cat] = round(_percentile(rs, DISCOUNT_PERCENTILE), 4) if rs else 1.0
+        mean_val = (sum(rs) / len(rs)) if rs else 0.0
+        print(f"    {cat}: mean={mean_val:.4f}  p{DISCOUNT_PERCENTILE}={result[cat]:.4f}  n={len(rs)}")
+    return result
 
 
 def main():
@@ -183,14 +191,17 @@ def main():
                 corpus.append(json.loads(line))
     print(f"corpus: {len(corpus)} entries")
 
-    # Load existing discounts so we can preserve values for skipped models.
-    existing: dict[str, float] = {}
+    # Load existing segmented discounts to preserve values for skipped models.
+    existing: dict[str, dict] = {}
     existing_path = os.path.join(OUTPUT_DIR, "config.json")
     if os.path.exists(existing_path):
         try:
             raw = json.loads(open(existing_path).read())
-            existing = {k: v for k, v in raw.items() if isinstance(v, (int, float))}
-            print(f"loaded {len(existing)} existing discounts from config.json")
+            for k, v in raw.items():
+                if isinstance(v, dict) and set(v.keys()) >= {"zh", "mixed", "en"}:
+                    existing[k] = v
+            if existing:
+                print(f"loaded {len(existing)} existing segmented discounts from config.json")
         except Exception:
             pass
 
@@ -202,32 +213,36 @@ def main():
             return True
         return False
 
-    discounts: dict[str, float] = {}
+    discounts: dict[str, dict] = {}
     skipped: list[str] = []
     for key in ALL_MODELS:
         if _api_key_missing(key):
             if key in existing:
                 discounts[key] = existing[key]
-                print(f"\n[{key}] skipped (no API key) — kept existing {discounts[key]:.4f}")
+                print(f"\n[{key}] skipped (no API key) — kept existing {existing[key]}")
             else:
                 print(f"\n[{key}] skipped (no API key) — no existing value, will be covered by default")
             skipped.append(key)
             continue
         print(f"\n[{key}] calculating discount ...")
-        d = calc_discount(key, corpus)
-        discounts[key] = round(d, 4)
-        print(f"  {key}: {discounts[key]:.4f}")
+        discounts[key] = calc_discount(key, corpus)
+        print(f"  {key}: {discounts[key]}")
 
     if skipped:
         print(f"\nskipped models (no API key): {skipped}")
 
-    # default = most conservative (largest) among computed models,
-    # so unknown models never undercount.
+    # default = most conservative (largest per category) among computed models.
     computed = [v for k, v in discounts.items() if k not in skipped]
     if not computed:
         computed = list(discounts.values())
-    discounts["default"] = max(computed) if computed else 1.0
-    print(f"\ndefault (most conservative): {discounts['default']:.4f}")
+    if computed:
+        discounts["default"] = {
+            cat: max(v[cat] for v in computed if cat in v)
+            for cat in CATEGORIES
+        }
+    else:
+        discounts["default"] = {cat: 1.0 for cat in CATEGORIES}
+    print(f"\ndefault (most conservative): {discounts['default']}")
 
     out_path = os.path.join(OUTPUT_DIR, "config.json")
     with open(out_path, "w", encoding="utf-8") as f:

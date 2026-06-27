@@ -66,7 +66,8 @@ func TestLoadReturnsErrorWhenTableLengthIsInvalid(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "doubao.bin"), []byte{1, 2, 3}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"default":1.0}`), 0o644); err != nil {
+	cfg := `{"default":{"zh":1.0,"mixed":1.0,"en":1.0}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -97,7 +98,7 @@ func TestEstimateFallsBackWhenModelTableIsMissing(t *testing.T) {
 	}
 	tables := &Tables{
 		bins:      map[string][]byte{"doubao": doubao},
-		discounts: map[string]float64{"default": 1.0},
+		discounts: map[string]segmentedDiscount{"default": {Zh: 1.0, Mixed: 1.0, En: 1.0}},
 	}
 
 	got := tables.Estimate("你好", "qwen")
@@ -109,7 +110,7 @@ func TestEstimateFallsBackWhenModelTableIsMissing(t *testing.T) {
 func TestEstimateDoesNotTreatASCIISpaceAsRareSymbol(t *testing.T) {
 	tables := &Tables{
 		bins:      map[string][]byte{},
-		discounts: map[string]float64{"default": 1.0},
+		discounts: map[string]segmentedDiscount{"default": {Zh: 1.0, Mixed: 1.0, En: 1.0}},
 	}
 
 	got := tables.Estimate("Hello world", "unknown")
@@ -119,9 +120,10 @@ func TestEstimateDoesNotTreatASCIISpaceAsRareSymbol(t *testing.T) {
 }
 
 func TestEstimateUsesModelSpecificWeightsBeforeDefaultWeights(t *testing.T) {
+	flat1 := segmentedDiscount{Zh: 1.0, Mixed: 1.0, En: 1.0}
 	tables := &Tables{
 		bins:      map[string][]byte{},
-		discounts: map[string]float64{"default": 1.0, "gpt-4o": 1.0},
+		discounts: map[string]segmentedDiscount{"default": flat1, "gpt-4o": flat1},
 		weights: map[string]heuristicWeights{
 			"default": {ASCIISpace: 1.0},
 			"gpt-4o":  {ASCIISpace: 0.2},
@@ -155,7 +157,7 @@ func TestResolveKeyUsesSpecificGenerationBeforeFamilyFallback(t *testing.T) {
 func TestEstimateFallsBackToDefaultCJKTokenWhenDoubaoIsMissing(t *testing.T) {
 	tables := &Tables{
 		bins:      map[string][]byte{},
-		discounts: map[string]float64{"default": 1.0},
+		discounts: map[string]segmentedDiscount{"default": {Zh: 1.0, Mixed: 1.0, En: 1.0}},
 	}
 
 	got := tables.Estimate("你好", "qwen")
@@ -183,7 +185,8 @@ func TestInitLoadsDefaultTables(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "doubao.bin"), table, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"default":1.0}`), 0o644); err != nil {
+	cfg := `{"default":{"zh":1.0,"mixed":1.0,"en":1.0}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

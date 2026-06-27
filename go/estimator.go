@@ -16,9 +16,20 @@ const (
 	cjkEnd   = 0x9FFF
 	cjkCount = cjkEnd - cjkStart + 1 // 20992
 
+	// Text category thresholds (fraction of CJK chars in the rune slice).
+	zhThreshold = 0.6 // >= zhThreshold → "zh"
+	enThreshold = 0.1 // <= enThreshold → "en"; otherwise "mixed"
+
 	// Built-in defaults used when no table / no discount is available.
 	defaultDiscount = 0.9 // conservative; overridden by config.json["default"]
 )
+
+// segmentedDiscount holds separate correction factors for each text category.
+type segmentedDiscount struct {
+	Zh    float64 `json:"zh"`
+	Mixed float64 `json:"mixed"`
+	En    float64 `json:"en"`
+}
 
 type heuristicWeights struct {
 	DefaultCJK     float64 `json:"default_cjk"`
@@ -53,7 +64,7 @@ func defaultWeights() heuristicWeights {
 // Tables holds per-model data loaded at startup.
 type Tables struct {
 	bins      map[string][]byte
-	discounts map[string]float64
+	discounts map[string]segmentedDiscount
 	weights   map[string]heuristicWeights
 }
 
@@ -113,7 +124,7 @@ func Load(dir string) (*Tables, error) {
 		return nil, fmt.Errorf("no token table .bin files found in %s", dir)
 	}
 
-	discounts := map[string]float64{}
+	discounts := map[string]segmentedDiscount{}
 	weights := map[string]heuristicWeights{"default": defaultWeights()}
 	cfgData, err := os.ReadFile(filepath.Join(dir, "config.json"))
 	if err != nil {
@@ -132,15 +143,21 @@ func Load(dir string) (*Tables, error) {
 			weights = parsedWeights
 			continue
 		}
-		var discount float64
-		if err := json.Unmarshal(raw, &discount); err != nil {
+		// Try segmented discount first, then flat float for backward compat.
+		var sd segmentedDiscount
+		if err := json.Unmarshal(raw, &sd); err == nil && (sd.Zh > 0 || sd.Mixed > 0 || sd.En > 0) {
+			discounts[key] = sd
+			continue
+		}
+		var flat float64
+		if err := json.Unmarshal(raw, &flat); err != nil {
 			return nil, fmt.Errorf("parse config.json discount %q: %w", key, err)
 		}
-		discounts[key] = discount
+		discounts[key] = segmentedDiscount{Zh: flat, Mixed: flat, En: flat}
 	}
 	// Guarantee a default discount exists so estimation never multiplies by 0.
 	if _, ok := discounts["default"]; !ok {
-		discounts["default"] = defaultDiscount
+		discounts["default"] = segmentedDiscount{Zh: defaultDiscount, Mixed: defaultDiscount, En: defaultDiscount}
 	}
 
 	return &Tables{bins: bins, discounts: discounts, weights: weights}, nil
@@ -265,11 +282,40 @@ func (t *Tables) pickTable(key string) []byte {
 	return nil
 }
 
-func (t *Tables) discountFor(key string) float64 {
-	if d, ok := t.discounts[key]; ok {
-		return d
+// classifyText returns "zh", "en", or "mixed" based on the CJK character ratio.
+func classifyText(runes []rune) string {
+	if len(runes) == 0 {
+		return "mixed"
 	}
-	return t.discounts["default"] // always present (guaranteed by Load)
+	cjk := 0
+	for _, r := range runes {
+		if r >= cjkStart && r <= cjkEnd {
+			cjk++
+		}
+	}
+	ratio := float64(cjk) / float64(len(runes))
+	if ratio >= zhThreshold {
+		return "zh"
+	}
+	if ratio <= enThreshold {
+		return "en"
+	}
+	return "mixed"
+}
+
+func (t *Tables) discountFor(key, textClass string) float64 {
+	sd, ok := t.discounts[key]
+	if !ok {
+		sd = t.discounts["default"]
+	}
+	switch textClass {
+	case "zh":
+		return sd.Zh
+	case "en":
+		return sd.En
+	default:
+		return sd.Mixed
+	}
 }
 
 func (t *Tables) weightsFor(key string) heuristicWeights {
@@ -283,14 +329,15 @@ func (t *Tables) weightsFor(key string) heuristicWeights {
 }
 
 // Estimate returns an approximate token count for text using the given model.
-// The discount is applied globally to the whole heuristic estimate.
+// The discount is chosen based on the text's CJK character ratio (zh/mixed/en).
 func (t *Tables) Estimate(text, model string) int {
 	key := resolveKey(model)
 	table := t.pickTable(key)
-	discount := t.discountFor(key)
 	weights := t.weightsFor(key)
 
 	runes := []rune(text)
+	textClass := classifyText(runes)
+	discount := t.discountFor(key, textClass)
 	var tokens float64
 
 	i := 0
