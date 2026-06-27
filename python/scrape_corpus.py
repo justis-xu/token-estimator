@@ -29,25 +29,11 @@ WIKI_BATCH = 10
 V2EX_API   = "https://www.v2ex.com/api/topics/hot.json"
 RUANYF_ATOM = "https://www.ruanyifeng.com/blog/atom.xml"
 
-# All simple RSS feeds: (url, source_name, max_items)
-RSS_FEEDS = [
-    # --- news ---
-    ("http://www.people.com.cn/rss/politics.xml",        "peopledaily",  40),
-    ("http://www.people.com.cn/rss/tech.xml",            "peopledaily",  40),
-    ("http://www.chinanews.com.cn/rss/scroll-news.xml",  "chinanews",    50),
-    ("https://www.globaltimes.cn/rss/outbrain.xml",      "globaltimes",  30),
-    ("https://news.ifeng.com/rss/index_news.xml",        "ifeng",        40),
-    ("http://rss.sina.com.cn/news/china/focus15.xml",    "sina_news",    40),
-    ("http://www.gmw.cn/rss/",                           "gmw",          30),
-    ("https://www.caixin.com/rss/",                      "caixin",       30),
-    # --- tech ---
-    ("https://sspai.com/feed",                           "sspai",        30),
-    ("https://www.huxiu.com/rss/0.xml",                  "huxiu",        30),
-    ("https://36kr.com/feed",                            "36kr",         30),
-    ("https://www.ifanr.com/feed",                       "ifanr",        30),
-    ("https://www.geekpark.net/rss",                     "geekpark",     30),
-    ("https://www.infoq.cn/feed",                        "infoq",        30),
-    ("https://www.oschina.net/news/rss",                 "oschina",      30),
+# High-quality HF datasets for Chinese/English text
+# (dataset_name, config_name, split, source_name, n_items)
+HF_DATASETS = [
+    ("wangrui6/Zhihu-KOL", "default", "train", "hf_zhihu", 1000),                 # Chinese Q&A
+    ("Skylion007/openwebtext", "default", "train", "hf_openwebtext", 300),        # English web text
 ]
 
 
@@ -55,47 +41,44 @@ RSS_FEEDS = [
 # Source 1 & 2: Wikipedia (Chinese + English) — batch via action=query
 # ---------------------------------------------------------------------------
 
-def fetch_wikipedia(n: int, lang: str = "zh", writer=None) -> list[dict]:
-    """Fetch n Wikipedia articles, writing incrementally if writer is provided."""
-    source = "zh_wikipedia" if lang == "zh" else "en_wikipedia"
-    url = WIKI_API.format(lang=lang)
-    min_len = WIKI_MIN_LEN if lang == "zh" else 80
-    params = {
-        "action":       "query",
-        "generator":    "random",
-        "grnnamespace": 0,
-        "grnlimit":     WIKI_BATCH,
-        "prop":         "extracts",
-        "explaintext":  True,
-        "exlimit":      WIKI_BATCH,
-        "format":       "json",
-    }
-    headers = {"User-Agent": "token-estimator/1.0 (calibration corpus)"}
+def fetch_hf_dataset(dataset_name: str, config_name: str, split: str, source: str, n: int, writer=None) -> list[dict]:
+    """Fetch n items from a Hugging Face dataset via streaming."""
     results = []
-    backoff = 1.0
-    while len(results) < n:
-        try:
-            r = requests.get(url, params=params, headers=headers, timeout=15)
-            if r.status_code == 429:
-                print(f"  {source}: 429, backing off {backoff:.0f}s ...")
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 60)
-                continue
-            r.raise_for_status()
-            backoff = 1.0
-            cap = EN_TEXT_CAP if lang == "en" else ZH_TEXT_CAP
-            for page in r.json().get("query", {}).get("pages", {}).values():
-                text = (page.get("extract") or "").strip()
-                if text and len(text) >= min_len:
-                    item = {"source": source, "text": text[:cap]}
-                    results.append(item)
-                    if writer:
-                        writer(item)
-            print(f"  {source}: {len(results)}/{n}")
-        except Exception as e:
-            print(f"  {source}: error {e}")
-        time.sleep(1.5)
-    return results[:n]
+    try:
+        from datasets import load_dataset
+        print(f"  {source}: loading {dataset_name} ({split})...")
+        # Load dataset dynamically based on whether it needs a config name
+        if config_name and config_name != "default":
+            ds = load_dataset(dataset_name, config_name, split=split, streaming=True)
+        else:
+            ds = load_dataset(dataset_name, split=split, streaming=True)
+        
+        for row in ds:
+            # Handle different column names (text vs INSTRUCTION/RESPONSE)
+            text = row.get("text", "")
+            if not text and "INSTRUCTION" in row and "RESPONSE" in row:
+                text = row["INSTRUCTION"] + "\n\n" + row["RESPONSE"]
+                
+            # basic clean up and length filter
+            text = re.sub(r"\s{3,}", "\n\n", text).strip()
+            if len(text) > 200:
+                cap = EN_TEXT_CAP if "en" in source or "openwebtext" in source else ZH_TEXT_CAP
+                item = {"source": source, "text": text[:cap]}
+                results.append(item)
+                if writer:
+                    writer(item)
+            if len(results) >= n:
+                break
+        print(f"  {source}: {len(results)}/{n}")
+    except Exception as e:
+        print(f"  {source}: error {e}")
+    return results
+
+def fetch_wikipedia(n: int, lang: str = "zh", writer=None) -> list[dict]:
+    """Fetch Wikipedia using HF datasets instead of Wikimedia API."""
+    source = "zh_wikipedia" if lang == "zh" else "en_wikipedia"
+    config = "20231101.zh" if lang == "zh" else "20231101.en"
+    return fetch_hf_dataset("wikimedia/wikipedia", config, "train", source, n, writer)
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +90,7 @@ def fetch_rss(url: str, source: str, n: int) -> list[dict]:
     results = []
     try:
         r = requests.get(url, timeout=15,
-                         headers={"User-Agent": "token-estimator/1.0"})
+                         headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
         r.raise_for_status()
         root = ET.fromstring(r.content)
         # RSS <item> or Atom <entry>
@@ -134,7 +117,7 @@ def fetch_v2ex(n: int) -> list[dict]:
     results = []
     try:
         r = requests.get(V2EX_API, timeout=15,
-                         headers={"User-Agent": "token-estimator/1.0",
+                         headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                                   "Referer": "https://www.v2ex.com/"})
         r.raise_for_status()
         for topic in r.json()[:n]:
@@ -437,20 +420,20 @@ def main():
     # build task list
     tasks: list[tuple] = []  # (fn, *args)
 
-    # Wikipedia zh (1000, min 500 chars)
-    zh_need = max(0, 1000 - have.get("zh_wikipedia", 0))
+    # Wikipedia zh (2000, min 500 chars)
+    zh_need = max(0, 2000 - have.get("zh_wikipedia", 0))
     if zh_need > 0:
         tasks.append(("wiki_zh", zh_need))
-    # Wikipedia en (50)
-    en_need = max(0, 50 - have.get("en_wikipedia", 0))
+    # Wikipedia en (200)
+    en_need = max(0, 200 - have.get("en_wikipedia", 0))
     if en_need > 0:
         tasks.append(("wiki_en", en_need))
 
-    # RSS feeds — each source independent
-    for url, source, n in RSS_FEEDS:
+    # HF additional datasets
+    for ds_name, cfg, split, source, n in HF_DATASETS:
         need = max(0, n - have.get(source, 0))
         if need > 0:
-            tasks.append(("rss", url, source, need))
+            tasks.append(("hf_ds", ds_name, cfg, split, source, need))
 
     # V2EX (JSON API)
     if have.get("v2ex", 0) < 30:
@@ -473,9 +456,9 @@ def main():
             fetch_wikipedia(task[1], "zh", write)
         elif kind == "wiki_en":
             fetch_wikipedia(task[1], "en", write)
-        elif kind == "rss":
-            _, url, source, n = task
-            write_all(fetch_rss(url, source, n))
+        elif kind == "hf_ds":
+            _, ds_name, cfg, split, source, n = task
+            fetch_hf_dataset(ds_name, cfg, split, source, n, write)
         elif kind == "v2ex":
             write_all(fetch_v2ex(task[1]))
         elif kind == "ruanyifeng":
