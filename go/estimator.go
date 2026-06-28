@@ -15,17 +15,17 @@ import (
 const (
 	cjkStart = 0x4E00
 	cjkEnd   = 0x9FFF
-	cjkCount = cjkEnd - cjkStart + 1 // 20992
+	cjkCount = cjkEnd - cjkStart + 1 // 20992 个汉字
 
-	// Text category thresholds (fraction of CJK chars in the rune slice).
-	zhThreshold = 0.6 // >= zhThreshold → "zh"
-	enThreshold = 0.1 // <= enThreshold → "en"; otherwise "mixed"
+	// 文本类别阈值（CJK 字符在 rune 切片中的占比）
+	zhThreshold = 0.6 // ≥ zhThreshold → "zh"
+	enThreshold = 0.1 // ≤ enThreshold → "en"；否则 "mixed"
 
-	// Built-in defaults used when no table / no discount is available.
-	defaultDiscount = 0.9 // conservative; overridden by config.json["default"]
+	// 无词表 / 无 discount 时的兜底值
+	defaultDiscount = 0.9 // 保守值；被 config.json["default"] 覆盖
 )
 
-// segmentedDiscount holds separate correction factors for each text category.
+// segmentedDiscount 存储各文本类别（zh/mixed/en）的独立 discount 系数。
 type segmentedDiscount struct {
 	Zh    float64 `json:"zh"`
 	Mixed float64 `json:"mixed"`
@@ -48,31 +48,31 @@ type heuristicWeights struct {
 
 func defaultWeights() heuristicWeights {
 	return heuristicWeights{
-		DefaultCJK:     1.5,
-		LatinDivisor:   4.0,
-		Hiragana:       1.0,
-		Korean:         1.5,
-		Digit:          0.5,
-		Newline:        0.5,
-		Tab:            0.8,
-		ASCIISpace:     0.2,
-		CJKPunctuation: 1.0,
-		ASCIIPunct:     0.7,
-		Other:          3.0,
+		DefaultCJK:     1.5, // 无词表时 CJK 兜底除数：1/1.5≈0.667 token/字（withDefaults 保证非零，避免除零）
+		LatinDivisor:   4.0, // 拉丁字母：ceil(词长 / 4) ≈ BPE 平均合并率
+		Hiragana:       1.0, // 平假名 / 片假名：粒度接近汉字
+		Korean:         1.5, // 韩文音节：切分较细，保守高估
+		Digit:          0.5, // 数字：多位数通常合并，平均 2 位 ≈ 1 token
+		Newline:        0.5, // 换行符：各模型行为一致，约 0.5 token
+		Tab:            0.8, // Tab：缩进场景下多数独立成 token
+		ASCIISpace:     0.2, // ASCII 空格：常与相邻 token 合并，权重极低
+		CJKPunctuation: 1.0, // 中文标点 / 全角符号：通常独立成 token
+		ASCIIPunct:     0.7, // ASCII 标点：多数独立或两两合并
+		Other:          3.0, // 其余（emoji、罕见符号）：编码复杂，保守高估
 	}
 }
 
-// Tables holds per-model data loaded at startup.
+// Tables 持有启动时一次性加载的所有模型数据。
 type Tables struct {
 	bins      map[string][]byte
-	bigrams   map[string]map[uint32]byte // model key → bigram lookup table
+	bigrams   map[string]map[uint32]byte // 模型 key → 高频词表
 	discounts map[string]segmentedDiscount
 	weights   map[string]heuristicWeights
 }
 
 var defaultTables *Tables
 
-// Init loads tables into the package-level estimator used by Estimate.
+// Init 将词表加载到包级估算器，供 Estimate 函数使用。
 func Init(dir string) error {
 	tables, err := Load(dir)
 	if err != nil {
@@ -82,16 +82,16 @@ func Init(dir string) error {
 	return nil
 }
 
-// Estimate uses tables previously loaded by Init.
+// Estimate 使用 Init 预加载的词表估算 token 数。
 func Estimate(text, model string) (int, error) {
 	if defaultTables == nil {
-		return 0, errors.New("estimator is not initialized")
+		return 0, errors.New("estimator 未初始化，请先调用 Init")
 	}
 	return defaultTables.Estimate(text, model), nil
 }
 
-// Load reads all .bin files and config.json from dir into memory.
-// dir defaults to the TOKEN_TABLES_DIR environment variable when empty.
+// Load 将 dir 目录下的所有 .bin / .bigram 文件和 config.json 读入内存。
+// dir 为空时读取环境变量 TOKEN_TABLES_DIR。
 func Load(dir string) (*Tables, error) {
 	if dir == "" {
 		dir = os.Getenv("TOKEN_TABLES_DIR")
@@ -160,7 +160,7 @@ func Load(dir string) (*Tables, error) {
 			weights = parsedWeights
 			continue
 		}
-		// Try segmented discount first, then flat float for backward compat.
+		// 优先解析分段 discount；兼容旧格式的单一浮点数
 		var sd segmentedDiscount
 		if err := json.Unmarshal(raw, &sd); err == nil && (sd.Zh > 0 || sd.Mixed > 0 || sd.En > 0) {
 			discounts[key] = sd
@@ -172,7 +172,7 @@ func Load(dir string) (*Tables, error) {
 		}
 		discounts[key] = segmentedDiscount{Zh: flat, Mixed: flat, En: flat}
 	}
-	// Guarantee a default discount exists so estimation never multiplies by 0.
+	// 保证 default discount 始终存在，避免估算结果乘以 0
 	if _, ok := discounts["default"]; !ok {
 		discounts["default"] = segmentedDiscount{Zh: defaultDiscount, Mixed: defaultDiscount, En: defaultDiscount}
 	}
@@ -199,7 +199,7 @@ func parseBigramBin(data []byte) (map[uint32]byte, error) {
 }
 
 func (t *Tables) bigramFor(key string) map[uint32]byte {
-	return t.bigrams[key] // nil if not present — caller skips bigram lookup
+	return t.bigrams[key] // 无词表时返回 nil，调用方跳过高频词查找
 }
 
 func parseWeights(raw json.RawMessage) (map[string]heuristicWeights, error) {
@@ -259,19 +259,19 @@ func (w heuristicWeights) withDefaults() heuristicWeights {
 	return w
 }
 
-// resolveKey maps an arbitrary model string to an internal key.
+// resolveKey 将任意模型名映射到内部 key。
 func resolveKey(model string) string {
 	m := strings.ToLower(model)
 
-	// OpenAI reasoning series — must come before generic "gpt" check
+	// OpenAI 推理系列：必须在通用 "gpt" 匹配之前处理
 	if strings.HasPrefix(m, "o1") || strings.HasPrefix(m, "o3") || strings.HasPrefix(m, "o4") {
 		return "gpt-4o"
 	}
-	// o200k_base family: gpt-4o, gpt-5, gpt-5.1, ...
+	// o200k_base 系列：gpt-4o, gpt-5, gpt-5.1, ...
 	if strings.Contains(m, "gpt-4o") || strings.Contains(m, "gpt-5") {
 		return "gpt-4o"
 	}
-	// cl100k_base family: gpt-4, gpt-4-turbo, gpt-3.5-turbo
+	// cl100k_base 系列：gpt-4, gpt-4-turbo, gpt-3.5-turbo
 	if strings.Contains(m, "gpt") {
 		return "gpt-4"
 	}
@@ -308,20 +308,13 @@ func resolveKey(model string) string {
 	return "default"
 }
 
-// pickTable returns the best available table for key, or nil if none can be
-// found. A nil table triggers the built-in default algorithm (defaultCJKToken
-// per CJK char), so estimation still works for unknown/uncovered models.
+// pickTable 返回 key 对应的词表；找不到则返回 nil，
+// 由 DefaultCJK 权重（经 calculate_weights.py 校准）兜底。
 func (t *Tables) pickTable(key string) []byte {
-	if tbl, ok := t.bins[key]; ok {
-		return tbl
-	}
-	if tbl, ok := t.bins["doubao"]; ok { // most conservative known table
-		return tbl
-	}
-	return nil
+	return t.bins[key]
 }
 
-// classifyText returns "zh", "en", or "mixed" based on the CJK character ratio.
+// classifyText 按 CJK 字符占比返回 "zh"、"en" 或 "mixed"。
 func classifyText(runes []rune) string {
 	if len(runes) == 0 {
 		return "mixed"
@@ -361,14 +354,11 @@ func (t *Tables) weightsFor(key string) heuristicWeights {
 	if weights, ok := t.weights[key]; ok {
 		return weights.withDefaults()
 	}
-	if weights, ok := t.weights["default"]; ok {
-		return weights.withDefaults()
-	}
+	// 未知模型走硬编码默认权重，不依赖 config.json 的 "default" 段
 	return defaultWeights()
 }
 
-// Estimate returns an approximate token count for text using the given model.
-// The discount is chosen based on the text's CJK character ratio (zh/mixed/en).
+// Estimate 返回文本的估算 token 数，discount 根据 CJK 字符占比（zh/mixed/en）选取。
 func (t *Tables) Estimate(text, model string) int {
 	key := resolveKey(model)
 	table := t.pickTable(key)
@@ -378,8 +368,8 @@ func (t *Tables) Estimate(text, model string) int {
 	textClass := classifyText(runes)
 	discount := t.discountFor(key, textClass)
 	bg := t.bigramFor(key)
-	// bigramTokens: exact counts from bigram table — not scaled by discount.
-	// heuristicTokens: everything else — scaled by discount for statistical correction.
+	// bigramTokens：高频词表精确命中，不参与 discount 缩放
+	// heuristicTokens：其余启发式估算，最终乘以 discount
 	var bigramTokens, heuristicTokens float64
 
 	i := 0
@@ -387,7 +377,7 @@ func (t *Tables) Estimate(text, model string) int {
 		cp := runes[i]
 
 		switch {
-		// CJK Unified Ideographs (main block) — bigram → single-char table → default
+		// CJK 基本区：优先查高频词表 → 单字表 → 兜底系数
 		case cp >= cjkStart && cp <= cjkEnd:
 			if bg != nil && i+1 < len(runes) {
 				cp2 := runes[i+1]
@@ -403,16 +393,16 @@ func (t *Tables) Estimate(text, model string) int {
 			if table != nil {
 				heuristicTokens += float64(table[cp-cjkStart])
 			} else {
-				heuristicTokens += weights.DefaultCJK
+				heuristicTokens += 1.0 / weights.DefaultCJK
 			}
 			i++
 
-		// CJK Extension A / Compatibility Ideographs (fallback)
+		// CJK 扩展区 / 兼容汉字：UTF-8 三字节，BPE 按字节切分 → 固定 3 token/字
 		case (cp >= 0x3400 && cp <= 0x4DBF) || (cp >= 0xF900 && cp <= 0xFAFF):
-			heuristicTokens += weights.DefaultCJK
+			heuristicTokens += 3.0
 			i++
 
-		// Latin letter run — scale with length
+		// 拉丁字母连续段：按词长分桶
 		case isLatin(cp):
 			j := i + 1
 			for j < len(runes) && isLatin(runes[j]) {
@@ -421,17 +411,17 @@ func (t *Tables) Estimate(text, model string) int {
 			heuristicTokens += math.Ceil(float64(j-i) / weights.LatinDivisor)
 			i = j
 
-		// Hiragana / Katakana
+		// 平假名 / 片假名
 		case (cp >= 0x3040 && cp <= 0x309F) || (cp >= 0x30A0 && cp <= 0x30FF):
 			heuristicTokens += weights.Hiragana
 			i++
 
-		// Korean syllables
+		// 韩文音节
 		case cp >= 0xAC00 && cp <= 0xD7AF:
 			heuristicTokens += weights.Korean
 			i++
 
-		// Digit run
+		// 数字连续段
 		case unicode.IsDigit(cp):
 			j := i + 1
 			for j < len(runes) && unicode.IsDigit(runes[j]) {
@@ -440,31 +430,32 @@ func (t *Tables) Estimate(text, model string) int {
 			heuristicTokens += float64(j-i) * weights.Digit
 			i = j
 
-		// Newlines
+		// 换行符
 		case cp == '\n' || cp == '\r':
 			heuristicTokens += weights.Newline
 			i++
 
-		// ASCII whitespace often merges into adjacent tokens, especially in
-		// code, JSON, and Markdown indentation.
+		// Tab（代码/JSON/Markdown 缩进场景下常见）
 		case cp == '\t':
 			heuristicTokens += weights.Tab
 			i++
+
+		// ASCII 空格
 		case cp == ' ':
 			heuristicTokens += weights.ASCIISpace
 			i++
 
-		// CJK / fullwidth / general punctuation (，。、；：？！ etc.)
+		// 中文标点 / 全角符号（，。、；：？！等）
 		case (cp >= 0x2000 && cp <= 0x206F) || (cp >= 0x3000 && cp <= 0x303F) || (cp >= 0xFF00 && cp <= 0xFFEF):
 			heuristicTokens += weights.CJKPunctuation
 			i++
 
-		// ASCII punctuation (printable, non-alphanumeric)
+		// ASCII 标点（可打印非字母数字）
 		case cp >= 0x21 && cp <= 0x7E && !unicode.IsLetter(cp) && !unicode.IsDigit(cp):
 			heuristicTokens += weights.ASCIIPunct
 			i++
 
-		// Everything else (emoji, rare symbols, …)
+		// 其余：emoji、罕见符号等
 		default:
 			heuristicTokens += weights.Other
 			i++

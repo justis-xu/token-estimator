@@ -1,5 +1,7 @@
 # token-estimator
 
+> 项目地址：[github.com/justis-xu/token-estimator](https://github.com/justis-xu/token-estimator)
+
 面向中文场景的轻量级 token 数量估算器。无 API 调用，无网络依赖，Go 内存查表，单次估算延迟在微秒级。
 
 ---
@@ -13,6 +15,8 @@
 本地精确分词（如 tiktoken）只覆盖 GPT 系列，对 Qwen、DeepSeek、Claude 等模型估算结果是错的。
 
 token-estimator 的目标：**本地、零网络、延迟接近零、误差 ≤ 15%**，覆盖主流中文模型。
+
+![](https://img-1302474103.cos.ap-nanjing.myqcloud.com/202606280823261.png)
 
 ---
 
@@ -71,10 +75,10 @@ token-estimator 的目标：**本地、零网络、延迟接近零、误差 ≤ 
 | `kimi` / `moonshot` | HuggingFace tokenizer | Kimi-K2 |
 | `gpt-4o` / `o1` / `o3` / `o4` / `gpt-5` | tiktoken | o200k_base |
 | `gpt-4` / `gpt-3.5` | tiktoken | cl100k_base |
+| `claude` | tiktoken（近似） | o200k_base |
 | `doubao` | Volcano Engine API | 豆包 Seed-1.6 |
-| `claude` | Anthropic API | claude-opus-4-8 |
 
-未匹配的模型优先使用豆包词表（粒度偏细，不会低估），再回退到 1.5 token/字。
+未匹配的模型使用跨模型均值权重兜底，CJK 字符约 0.67 token/字（除数 1.5），不会高估。
 
 ---
 
@@ -92,13 +96,11 @@ export HF_TOKEN=...
 # 豆包需要火山引擎 API Key
 export ARK_API_KEY=...
 
-# Claude 需要 Anthropic API Key（可选）
-export ANTHROPIC_API_KEY=...
-
-python generate_tables.py    # 生成 output/*.bin（单字表，每模型 20KB）
-python scrape_corpus.py      # 抓取校准语料 output/corpus.jsonl（~1000 万字）
-python generate_bigrams.py   # 生成 output/*.bigram（top-5000 高频词表）
-python calculate_discount.py # 生成 output/config.json（分段 discount 系数）
+python generate_tables.py    # 生成 ../tables/*.bin（单字表，每模型 20KB）
+python scrape_corpus.py      # 拉取校准语料 output/corpus.jsonl（~1400 万字，HF datasets）
+python generate_bigrams.py   # 生成 ../tables/*.bigram（top-5000 高频词表）
+python calculate_weights.py  # 生成 ../tables/config.json weights 段（字符类权重）
+python calculate_discount.py # 更新 ../tables/config.json discount 段（分段 discount 系数）
 ```
 
 ### 2. 在 Go 服务里使用（在线）
@@ -129,8 +131,8 @@ if err != nil {
 cd go
 go test ./...
 
-# 如果已经生成 python/output，可额外跑真实 golden 精度测试
-TOKEN_TABLES_DIR=../python/output go test -v -run TestEstimateAccuracy ./...
+# 如果已经生成 tables/，可额外跑真实 golden 精度测试
+TOKEN_TABLES_DIR=../tables GOLDEN_DIR=../python/output go test -v -run TestEstimateAccuracy ./...
 ```
 
 ---
@@ -139,9 +141,21 @@ TOKEN_TABLES_DIR=../python/output go test -v -run TestEstimateAccuracy ./...
 
 目标 MAE ≤ 15%。因使用 55 百分位 discount，统计上会略微高估（1–5%），适合 context-compression 场景：**低估会导致 context 溢出，高估只是多截一点**。
 
-校准语料：~3600 条维基百科全文 + 中文新闻 + 技术文章 + 手写样本，约 1000 万字，zh/mixed/en 三类均有覆盖。
+校准语料：~5700 条（中文维基百科 + 知乎 + 英文维基百科 + OpenWebText + 手写样本），约 1400 万字，zh/mixed/en 三类均有覆盖。
 
-精确精度数据在完成最新一轮校准（`generate_golden.py` + `TestEstimateAccuracy`）后更新。
+最新精度（68,698 条 golden 样本，12 个模型，每模型约 5,725 条）：
+
+| 模型 | MAE |
+|------|-----|
+| gpt-4 | 2.7% |
+| gpt-4o / claude | 5.2% |
+| glm / glm4 | 7.0% |
+| qwen2 | 6.6% |
+| deepseek / deepseek-v3 | 7.3% |
+| doubao | 7.5% |
+| qwen | 7.7% |
+| minimax | 8.6% |
+| kimi | 9.1% |
 
 以下场景建议直接调分词 API：
 - **精确计费**：按 token 数核算费用，误差不可接受
@@ -154,15 +168,18 @@ TOKEN_TABLES_DIR=../python/output go test -v -run TestEstimateAccuracy ./...
 
 ```
 python/
-  generate_tables.py     # 生成各模型 CJK 单字词表（output/*.bin）
-  generate_bigrams.py    # 生成高频词表（output/*.bigram）
   scrape_corpus.py       # 抓取校准语料（output/corpus.jsonl）
-  calculate_discount.py  # 计算分段 discount 系数（output/config.json）
+  generate_tables.py     # 生成各模型 CJK 单字词表（tables/*.bin）
+  generate_bigrams.py    # 生成高频词表（tables/*.bigram）
+  calculate_weights.py   # 校准字符类权重（tables/config.json weights 段）
+  calculate_discount.py  # 计算分段 discount 系数（tables/config.json discount 段）
   generate_golden.py     # 生成精度验证集（output/golden.jsonl）
   estimate.py            # Python 版估算逻辑（与 Go 保持同步，供校准使用）
   config.py              # 模型配置
 
-  output/                # 生成产物（*.bin、*.bigram、config.json、corpus/golden）
+  output/                # 校准产物（corpus.jsonl、golden.jsonl）
+
+tables/                  # 运行时产物（*.bin、*.bigram、config.json）—— Go 服务加载此目录
 
 go/
   estimator.go           # 在线估算核心逻辑
@@ -174,4 +191,4 @@ go/
 
 ## 持续校准
 
-上线后记录 API 返回的 `usage.prompt_tokens`（真实值）和当时的估算值，积累 500 条以上后重跑 `calculate_discount.py`，替换 `config.json` 并重启服务即可生效，不需要改代码。
+上线后记录 API 返回的 `usage.prompt_tokens`（真实值）和当时的估算值，积累 500 条以上后重跑 `calculate_discount.py`，替换 `tables/config.json` 并重启服务即可生效，不需要改代码。

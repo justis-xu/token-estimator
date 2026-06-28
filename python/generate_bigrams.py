@@ -4,7 +4,7 @@ Generate per-model bigram token tables.
 For the top-N most frequent adjacent CJK character pairs found in the corpus,
 records how many tokens the model produces for that 2-character string.
 
-Output: output/{key}.bigram   (binary)
+Output: tables/{key}.bigram   (binary)
 Format: big-endian uint32 N, then N × (uint16 offset1, uint16 offset2, uint8 count)
         sorted by (offset1<<16|offset2) for fast lookup in Go.
 
@@ -21,7 +21,7 @@ from collections import Counter
 from config import (
     HF_MODELS, TIKTOKEN_MODELS, API_MODELS, ALL_MODELS,
     CJK_START, CJK_END,
-    OUTPUT_DIR, HF_TOKEN, ARK_API_KEY, ANTHROPIC_API_KEY,
+    OUTPUT_DIR, TABLES_DIR, HF_TOKEN, ARK_API_KEY,
 )
 
 TOP_N = 5000  # most-frequent bigrams to cover
@@ -148,8 +148,6 @@ def build_bigram_volc(model_key: str, cfg: dict, bigrams: list[str]) -> dict[str
 
 def _api_key_missing(model_key: str) -> bool:
     cfg = API_MODELS.get(model_key, {})
-    if cfg.get("type") == "anthropic" and not ANTHROPIC_API_KEY:
-        return True
     if cfg.get("type") == "volc" and not ARK_API_KEY:
         return True
     return False
@@ -179,9 +177,9 @@ def main():
     bigrams = extract_top_bigrams(corpus_path, TOP_N)
     print(f"  found {len(bigrams)} unique bigrams")
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(TABLES_DIR, exist_ok=True)
     for key in ALL_MODELS:
-        out_path = os.path.join(OUTPUT_DIR, f"{key}.bigram")
+        out_path = os.path.join(TABLES_DIR, f"{key}.bigram")
         if os.path.exists(out_path):
             print(f"[{key}] already exists, skipping")
             continue

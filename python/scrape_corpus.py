@@ -1,11 +1,13 @@
 """
-Scrape a mixed Chinese corpus for BPE discount calibration.
+Build a mixed Chinese/English corpus for BPE discount calibration.
 
-Sources (all parallel):
-  Wikipedia: zh (1000 quality articles ≥500 chars) + en (50)
-  News RSS:  人民日报(2) 中新社 环球时报 凤凰 新浪 光明日报 财新
-  Tech RSS:  少数派 虎嗅 36kr 爱范儿 极客公园 InfoQ开源中国 V2EX 阮一峰
-  Manual:    ~52 hand-written prompt/response samples
+Sources (run in parallel, incremental/resumable):
+  Wikipedia:   zh (2000 articles) + en (200) via wikimedia/wikipedia HF dataset
+  Zhihu-KOL:  1000 Chinese Q&A entries (wangrui6/Zhihu-KOL)
+  OpenWebText: 300 English web text entries (Skylion007/openwebtext)
+  V2EX:        30 tech forum posts (JSON API)
+  Ruanyifeng:  20 blog posts (Atom feed)
+  Manual:      ~52 hand-written prompt/response samples
 
 Output: output/corpus.jsonl  (incremental, resumable)
 """
@@ -13,7 +15,6 @@ Output: output/corpus.jsonl  (incremental, resumable)
 import json
 import os
 import re
-import time
 import threading
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,11 +23,8 @@ from config import OUTPUT_DIR
 
 ZH_TEXT_CAP  = 8000
 EN_TEXT_CAP  = 2000
-WIKI_MIN_LEN = 500
 
-WIKI_API   = "https://{lang}.wikipedia.org/w/api.php"
-WIKI_BATCH = 10
-V2EX_API   = "https://www.v2ex.com/api/topics/hot.json"
+V2EX_API    = "https://www.v2ex.com/api/topics/hot.json"
 RUANYF_ATOM = "https://www.ruanyifeng.com/blog/atom.xml"
 
 # High-quality HF datasets for Chinese/English text
@@ -47,7 +45,6 @@ def fetch_hf_dataset(dataset_name: str, config_name: str, split: str, source: st
     try:
         from datasets import load_dataset
         print(f"  {source}: loading {dataset_name} ({split})...")
-        # Load dataset dynamically based on whether it needs a config name
         if config_name and config_name != "default":
             ds = load_dataset(dataset_name, config_name, split=split, streaming=True)
         else:

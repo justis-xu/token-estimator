@@ -2,11 +2,11 @@
 Generate golden.jsonl — ground-truth token counts for the Go accuracy test.
 
 For each (corpus entry × model), record real token count.
-Output: output/golden.jsonl
+Output: output/golden.jsonl  (calibration data, not needed for Go runtime)
   {"text":"...","model":"qwen","tokens":42}
 
 Usage:
-  ARK_API_KEY=... ANTHROPIC_API_KEY=... HF_TOKEN=... python generate_golden.py
+  ARK_API_KEY=... HF_TOKEN=... python generate_golden.py
 
 This script reuses the real_count() helpers from calculate_discount.py.
 """
@@ -59,10 +59,8 @@ def write_golden(
 
 
 def _api_key_missing(model_key: str) -> bool:
-    from config import API_MODELS, ARK_API_KEY, ANTHROPIC_API_KEY
+    from config import API_MODELS, ARK_API_KEY
     cfg = API_MODELS.get(model_key, {})
-    if cfg.get("type") == "anthropic" and not ANTHROPIC_API_KEY:
-        return True
     if cfg.get("type") == "volc" and not ARK_API_KEY:
         return True
     return False

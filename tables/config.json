@@ -1,0 +1,201 @@
+{
+  "qwen": {
+    "zh": 0.8321,
+    "mixed": 0.8854,
+    "en": 0.6976
+  },
+  "qwen2": {
+    "zh": 0.898,
+    "mixed": 0.936,
+    "en": 0.689
+  },
+  "deepseek": {
+    "zh": 0.8038,
+    "mixed": 0.8279,
+    "en": 0.6714
+  },
+  "deepseek-v3": {
+    "zh": 0.8038,
+    "mixed": 0.8279,
+    "en": 0.6714
+  },
+  "glm": {
+    "zh": 0.8345,
+    "mixed": 0.8511,
+    "en": 0.666
+  },
+  "glm4": {
+    "zh": 0.8348,
+    "mixed": 0.8511,
+    "en": 0.666
+  },
+  "minimax": {
+    "zh": 0.7541,
+    "mixed": 0.7798,
+    "en": 0.6502
+  },
+  "kimi": {
+    "zh": 0.7789,
+    "mixed": 0.8234,
+    "en": 0.6682
+  },
+  "gpt-4o": {
+    "zh": 0.9058,
+    "mixed": 0.8718,
+    "en": 0.6565
+  },
+  "gpt-4": {
+    "zh": 0.9844,
+    "mixed": 0.9408,
+    "en": 0.6657
+  },
+  "claude": {
+    "zh": 0.9058,
+    "mixed": 0.8718,
+    "en": 0.6565
+  },
+  "default": {
+    "zh": 0.9844,
+    "mixed": 0.9408,
+    "en": 0.702
+  },
+  "weights": {
+    "qwen": {
+      "latin_divisor": 4.0,
+      "hiragana": 0.8,
+      "korean": 0.6,
+      "digit": 1.0,
+      "cjk_punctuation": 0.8571,
+      "ascii_punct": 0.75,
+      "other": 1.0,
+      "newline": 0.5,
+      "tab": 0.8,
+      "ascii_space": 0.2
+    },
+    "qwen2": {
+      "latin_divisor": 4.0,
+      "hiragana": 0.8,
+      "korean": 1.0,
+      "digit": 1.0,
+      "cjk_punctuation": 1.0,
+      "ascii_punct": 0.75,
+      "other": 1.0,
+      "newline": 0.5,
+      "tab": 0.8,
+      "ascii_space": 0.2
+    },
+    "deepseek": {
+      "latin_divisor": 4.0,
+      "hiragana": 0.8,
+      "korean": 1.0,
+      "digit": 0.335,
+      "cjk_punctuation": 1.0,
+      "ascii_punct": 0.875,
+      "other": 2.0,
+      "newline": 0.5,
+      "tab": 0.8,
+      "ascii_space": 0.2
+    },
+    "deepseek-v3": {
+      "latin_divisor": 4.0,
+      "hiragana": 0.8,
+      "korean": 1.0,
+      "digit": 0.335,
+      "cjk_punctuation": 1.0,
+      "ascii_punct": 0.875,
+      "other": 2.0,
+      "newline": 0.5,
+      "tab": 0.8,
+      "ascii_space": 0.2
+    },
+    "glm": {
+      "latin_divisor": 4.0,
+      "hiragana": 0.8,
+      "korean": 1.0,
+      "digit": 0.63,
+      "cjk_punctuation": 1.0,
+      "ascii_punct": 0.75,
+      "other": 1.0,
+      "newline": 0.5,
+      "tab": 0.8,
+      "ascii_space": 0.2
+    },
+    "glm4": {
+      "latin_divisor": 4.0,
+      "hiragana": 0.8,
+      "korean": 1.0,
+      "digit": 0.63,
+      "cjk_punctuation": 1.0,
+      "ascii_punct": 0.75,
+      "other": 2.0,
+      "newline": 0.5,
+      "tab": 0.8,
+      "ascii_space": 0.2
+    },
+    "minimax": {
+      "latin_divisor": 4.0,
+      "hiragana": 0.8,
+      "korean": 0.6,
+      "digit": 0.335,
+      "cjk_punctuation": 0.7143,
+      "ascii_punct": 0.875,
+      "other": 2.0,
+      "newline": 0.5,
+      "tab": 0.8,
+      "ascii_space": 0.2
+    },
+    "kimi": {
+      "latin_divisor": 4.0,
+      "hiragana": 1.0,
+      "korean": 1.0,
+      "digit": 0.335,
+      "cjk_punctuation": 1.0,
+      "ascii_punct": 0.75,
+      "other": 2.0,
+      "newline": 0.5,
+      "tab": 0.8,
+      "ascii_space": 0.2
+    },
+    "gpt-4o": {
+      "latin_divisor": 4.0,
+      "hiragana": 0.8,
+      "korean": 0.6,
+      "digit": 0.335,
+      "cjk_punctuation": 0.8571,
+      "ascii_punct": 0.63,
+      "other": 1.0,
+      "newline": 0.5,
+      "tab": 0.8,
+      "ascii_space": 0.2
+    },
+    "gpt-4": {
+      "latin_divisor": 4.0,
+      "hiragana": 0.8,
+      "korean": 1.2,
+      "digit": 0.335,
+      "cjk_punctuation": 1.0,
+      "ascii_punct": 0.75,
+      "other": 2.0,
+      "newline": 0.5,
+      "tab": 0.8,
+      "ascii_space": 0.2
+    },
+    "claude": {
+      "latin_divisor": 4.0,
+      "hiragana": 0.8,
+      "korean": 0.6,
+      "digit": 0.335,
+      "cjk_punctuation": 0.8571,
+      "ascii_punct": 0.63,
+      "other": 1.0,
+      "newline": 0.5,
+      "tab": 0.8,
+      "ascii_space": 0.2
+    }
+  },
+  "doubao": {
+    "zh": 0.8656,
+    "mixed": 0.9214,
+    "en": 0.702
+  }
+}

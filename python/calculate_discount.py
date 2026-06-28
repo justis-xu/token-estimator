@@ -1,26 +1,22 @@
 """
-Calculate per-model, per-category discount coefficients from corpus.jsonl.
+从语料计算各模型、各文本类别的分段 discount 系数。
 
-Each corpus entry is classified into one of three text categories based on
-the fraction of CJK characters in the text:
+文本按 CJK 字符占比分三类：
+    zh    — CJK 比例 ≥ 0.6（纯中文）
+    mixed — 0.1 < CJK 比例 < 0.6
+    en    — CJK 比例 ≤ 0.1（纯英文 / 代码）
 
-    zh    — CJK ratio >= 0.6   (mostly Chinese)
-    mixed — 0.1 < CJK ratio < 0.6
-    en    — CJK ratio <= 0.1   (mostly English / code)
+对每个（模型 × 类别）组合，收集比值：
+    r_i = (real_tokens_i - bigram_tokens_i) / heuristic_tokens_i
 
-For each (model, category) pair we collect ratios:
+取第 55 百分位作为 discount（略高于均值，使估算值在统计上偏高，
+避免 context-compression 场景的低估）。
 
-    r_i = real_tokens_i / estimate(table, text_i, discount=1.0)
-
-and set:
-
-    discount = percentile(ratios, DISCOUNT_PERCENTILE)
-
-Output: output/config.json  —  schema:
+输出：tables/config.json
     {"qwen": {"zh": 0.71, "mixed": 0.76, "en": 0.82}, ...}
 
-Usage:
-  ARK_API_KEY=... ANTHROPIC_API_KEY=... HF_TOKEN=... python calculate_discount.py
+用法：
+    ARK_API_KEY=... HF_TOKEN=... python calculate_discount.py
 """
 
 import json
@@ -29,24 +25,24 @@ import time
 import requests
 from config import (
     HF_MODELS, TIKTOKEN_MODELS, API_MODELS, ALL_MODELS,
-    OUTPUT_DIR, HF_TOKEN, ARK_API_KEY, ANTHROPIC_API_KEY,
+    OUTPUT_DIR, TABLES_DIR, HF_TOKEN, ARK_API_KEY,
 )
-from estimate import estimate_split, classify_text
+from estimate import estimate_split, classify_text, DEFAULT_WEIGHTS
 
 CATEGORIES = ("zh", "mixed", "en")
 
 # ---------------------------------------------------------------------------
-# Load tables
+# 加载词表
 # ---------------------------------------------------------------------------
 
 def load_table(model_key: str) -> bytes:
-    path = os.path.join(OUTPUT_DIR, f"{model_key}.bin")
+    path = os.path.join(TABLES_DIR, f"{model_key}.bin")
     with open(path, "rb") as f:
         return f.read()
 
 
 def load_bigrams(model_key: str) -> dict[str, int] | None:
-    path = os.path.join(OUTPUT_DIR, f"{model_key}.bigram")
+    path = os.path.join(TABLES_DIR, f"{model_key}.bigram")
     if not os.path.exists(path):
         return None
     import struct
@@ -63,7 +59,7 @@ def load_bigrams(model_key: str) -> dict[str, int] | None:
 
 
 # ---------------------------------------------------------------------------
-# Real token count — one backend per model type
+# 各模型真实 token 数
 # ---------------------------------------------------------------------------
 
 _hf_tokenizers: dict = {}
@@ -100,42 +96,6 @@ def real_count_volc(cfg: dict, text: str) -> int:
     return resp.json()["data"][0]["total_tokens"]
 
 
-_claude_client = None
-_claude_overhead: int | None = None
-
-
-def _get_claude_client():
-    global _claude_client
-    if _claude_client is None:
-        import anthropic
-        _claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    return _claude_client
-
-
-def _claude_raw_count(model: str, text: str) -> int:
-    resp = _get_claude_client().beta.messages.count_tokens(
-        model=model,
-        messages=[{"role": "user", "content": text}],
-    )
-    return resp.input_tokens
-
-
-def _get_claude_overhead(model: str) -> int:
-    """Message-structure overhead. Measured via a known 1-token reference char
-    ('a' is a single token in any tokenizer), avoiding empty content which the
-    API may reject."""
-    global _claude_overhead
-    if _claude_overhead is None:
-        _claude_overhead = _claude_raw_count(model, "a") - 1
-        print(f"  [claude] overhead = {_claude_overhead}")
-    return _claude_overhead
-
-
-def real_count_claude(cfg: dict, text: str) -> int:
-    overhead = _get_claude_overhead(cfg["model"])
-    return max(_claude_raw_count(cfg["model"], text) - overhead, 1)
-
-
 def real_count(model_key: str, text: str) -> int:
     if model_key in HF_MODELS:
         return real_count_hf(model_key, text)
@@ -144,22 +104,19 @@ def real_count(model_key: str, text: str) -> int:
     cfg = API_MODELS[model_key]
     if cfg["type"] == "volc":
         return real_count_volc(cfg, text)
-    if cfg["type"] == "anthropic":
-        return real_count_claude(cfg, text)
-    raise ValueError(f"unknown type for {model_key}")
+    raise ValueError(f"未知模型类型: {model_key}")
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Discount 校准
 # ---------------------------------------------------------------------------
 
-# 55th percentile: slightly above mean, biases toward over-estimation while
-# keeping MAE within the 15% threshold for context-compression safety.
+# 55 百分位：略高于均值，使估算值在统计上偏高，
+# 为 context-compression 场景提供安全边际
 DISCOUNT_PERCENTILE = 55
 
 
 def _percentile(data: list[float], p: int) -> float:
-    """Return the p-th percentile of data (0–100)."""
     if not data:
         return 1.0
     sorted_data = sorted(data)
@@ -168,25 +125,33 @@ def _percentile(data: list[float], p: int) -> float:
     return sorted_data[lo] + (sorted_data[hi] - sorted_data[lo]) * (k - lo)
 
 
-def calc_discount(model_key: str, corpus: list[dict]) -> dict[str, float]:
-    """Return {"zh": float, "mixed": float, "en": float} discount per text category."""
+def calc_discount(
+    model_key: str,
+    corpus: list[dict],
+    weights: dict[str, float] | None = None,
+) -> dict[str, float]:
+    """返回 {"zh": float, "mixed": float, "en": float} 分段 discount。
+
+    weights 来自 config.json 的 "weights" 段（若已校准），
+    与 estimate_split 保持一致。
+    """
     table = load_table(model_key)
     cfg   = API_MODELS.get(model_key, {})
     interval = 1.0 / cfg["rps"] if cfg else 0.0
 
     bigrams = load_bigrams(model_key)
     if bigrams:
-        print(f"  [{model_key}] loaded {len(bigrams)} bigrams")
+        print(f"  [{model_key}] 加载 {len(bigrams)} 个高频词对")
 
     ratios: dict[str, list[float]] = {c: [] for c in CATEGORIES}
     for entry in corpus:
         text = entry["text"]
         cat  = classify_text(text)
-        # Discount is only applied to the heuristic portion; bigram hits are not
-        # scaled. Calibrate as: discount = (real - bigram_tokens) / heuristic_tokens.
-        bigram_t, heuristic_t = estimate_split(table, text, bigrams=bigrams)
+        # discount 只作用于启发式部分；高频词命中不参与缩放。
+        # 校准公式：discount = (real - bigram_tokens) / heuristic_tokens
+        bigram_t, heuristic_t = estimate_split(table, text, bigrams=bigrams, weights=weights)
         if heuristic_t <= 0:
-            continue  # text is entirely bigram-covered; discount is irrelevant
+            continue  # 文本完全被高频词覆盖，discount 无意义
         real = real_count(model_key, text)
         ratios[cat].append((real - bigram_t) / heuristic_t)
         if interval:
@@ -201,10 +166,14 @@ def calc_discount(model_key: str, corpus: list[dict]) -> dict[str, float]:
     return result
 
 
-def main():
+# ---------------------------------------------------------------------------
+# 主函数
+# ---------------------------------------------------------------------------
+
+def main() -> None:
     corpus_path = os.path.join(OUTPUT_DIR, "corpus.jsonl")
     if not os.path.exists(corpus_path):
-        raise FileNotFoundError(f"{corpus_path} not found — run scrape_corpus.py first")
+        raise FileNotFoundError(f"{corpus_path} 不存在，请先运行 scrape_corpus.py")
 
     corpus = []
     with open(corpus_path, encoding="utf-8") as f:
@@ -212,26 +181,33 @@ def main():
             line = line.strip()
             if line:
                 corpus.append(json.loads(line))
-    print(f"corpus: {len(corpus)} entries")
+    print(f"语料: {len(corpus)} 条")
 
-    # Load existing segmented discounts to preserve values for skipped models.
+    # 从 config.json 加载已校准权重（若存在），保持与 Go 侧一致
+    existing_path = os.path.join(TABLES_DIR, "config.json")
     existing: dict[str, dict] = {}
-    existing_path = os.path.join(OUTPUT_DIR, "config.json")
+    weights: dict[str, float] | None = None
+
     if os.path.exists(existing_path):
         try:
             raw = json.loads(open(existing_path).read())
             for k, v in raw.items():
-                if isinstance(v, dict) and set(v.keys()) >= {"zh", "mixed", "en"}:
+                if k == "weights":
+                    # 取 default 权重供 Python 侧 estimate_split 使用
+                    if isinstance(v, dict) and "default" in v:
+                        weights = v["default"]
+                    elif isinstance(v, dict):
+                        weights = next(iter(v.values()), None)
+                    print(f"已加载权重配置（{'已校准' if weights else '默认'}）")
+                elif isinstance(v, dict) and set(v.keys()) >= {"zh", "mixed", "en"}:
                     existing[k] = v
             if existing:
-                print(f"loaded {len(existing)} existing segmented discounts from config.json")
+                print(f"已加载 {len(existing)} 个模型的 discount 基准")
         except Exception:
             pass
 
     def _api_key_missing(model_key: str) -> bool:
         cfg = API_MODELS.get(model_key, {})
-        if cfg.get("type") == "anthropic" and not ANTHROPIC_API_KEY:
-            return True
         if cfg.get("type") == "volc" and not ARK_API_KEY:
             return True
         return False
@@ -242,19 +218,19 @@ def main():
         if _api_key_missing(key):
             if key in existing:
                 discounts[key] = existing[key]
-                print(f"\n[{key}] skipped (no API key) — kept existing {existing[key]}")
+                print(f"\n[{key}] 跳过（无 API Key）— 保留已有值 {existing[key]}")
             else:
-                print(f"\n[{key}] skipped (no API key) — no existing value, will be covered by default")
+                print(f"\n[{key}] 跳过（无 API Key）— 无已有值，由 default 兜底")
             skipped.append(key)
             continue
-        print(f"\n[{key}] calculating discount ...")
-        discounts[key] = calc_discount(key, corpus)
+        print(f"\n[{key}] 计算 discount ...")
+        discounts[key] = calc_discount(key, corpus, weights=weights)
         print(f"  {key}: {discounts[key]}")
 
     if skipped:
-        print(f"\nskipped models (no API key): {skipped}")
+        print(f"\n跳过模型（无 API Key）: {skipped}")
 
-    # default = most conservative (largest per category) among computed models.
+    # default = 已计算模型中各类别最大值（最保守）
     computed = [v for k, v in discounts.items() if k not in skipped]
     if not computed:
         computed = list(discounts.values())
@@ -265,11 +241,19 @@ def main():
         }
     else:
         discounts["default"] = {cat: 1.0 for cat in CATEGORIES}
-    print(f"\ndefault (most conservative): {discounts['default']}")
+    print(f"\ndefault（最保守）: {discounts['default']}")
 
-    out_path = os.path.join(OUTPUT_DIR, "config.json")
+    # 保留 config.json 中的 weights 段，只更新 discount 值
+    out_path = os.path.join(TABLES_DIR, "config.json")
+    existing_cfg: dict = {}
+    if os.path.exists(out_path):
+        try:
+            existing_cfg = json.loads(open(out_path).read())
+        except Exception:
+            pass
+    existing_cfg.update(discounts)
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(discounts, f, indent=2, ensure_ascii=False)
+        json.dump(existing_cfg, f, indent=2, ensure_ascii=False)
     print(f"\nconfig.json → {out_path}")
 
 

@@ -2,10 +2,10 @@
 Generate per-model CJK single-character token tables.
 
 For each character U+4E00..U+9FFF, records how many tokens the model produces
-for that character (capped at 255). Output: output/{key}.bin, 20992 bytes.
+for that character (capped at 255). Output: tables/{key}.bin, 20992 bytes.
 
 Usage:
-  HF_TOKEN=...  ANTHROPIC_API_KEY=...  ARK_API_KEY=...  python generate_tables.py
+  HF_TOKEN=...  ARK_API_KEY=...  python generate_tables.py
 
 HF_TOKEN is needed for gated repos (Kimi-K2, DeepSeek-V3 etc.).
 Accept each model's license on HuggingFace before running.
@@ -17,7 +17,7 @@ import requests
 from config import (
     HF_MODELS, TIKTOKEN_MODELS, API_MODELS,
     CJK_START, CJK_END, CJK_COUNT,
-    OUTPUT_DIR, HF_TOKEN, ARK_API_KEY, ANTHROPIC_API_KEY,
+    TABLES_DIR, HF_TOKEN, ARK_API_KEY,
 )
 
 
@@ -124,45 +124,6 @@ def build_volc_table(model_key: str, cfg: dict, out_path: str = "") -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# API path — Anthropic (claude)
-# Baseline-subtract to remove messages-structure overhead.
-# ---------------------------------------------------------------------------
-
-def _claude_count(client, model: str, text: str) -> int:
-    import anthropic
-    resp = client.beta.messages.count_tokens(
-        model=model,
-        messages=[{"role": "user", "content": text}],
-    )
-    return resp.input_tokens
-
-
-def build_claude_table(model_key: str, cfg: dict) -> bytes:
-    import anthropic
-    if not ANTHROPIC_API_KEY:
-        raise EnvironmentError("ANTHROPIC_API_KEY is not set")
-
-    client   = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    model    = cfg["model"]
-    interval = 1.0 / cfg["rps"]
-
-    # Message-structure overhead via a known 1-token reference char ('a').
-    # Avoids empty content, which the API may reject.
-    overhead = _claude_count(client, model, "a") - 1
-    print(f"[{model_key}] overhead = {overhead} tokens")
-    time.sleep(interval)
-
-    table = bytearray(CJK_COUNT)
-    for i, cp in enumerate(range(CJK_START, CJK_END + 1)):
-        raw = _claude_count(client, model, chr(cp))
-        table[i] = min(max(raw - overhead, 1), 255)
-        if i % 500 == 0:
-            print(f"  {model_key}: {i}/{CJK_COUNT}")
-        time.sleep(interval)
-    return bytes(table)
-
-
-# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -174,26 +135,22 @@ def build_table(model_key: str, out_path: str = "") -> bytes:
     cfg = API_MODELS[model_key]
     if cfg["type"] == "volc":
         return build_volc_table(model_key, cfg, out_path)
-    if cfg["type"] == "anthropic":
-        return build_claude_table(model_key, cfg)
     raise ValueError(f"unknown model type for {model_key}")
 
 
 def _api_key_missing(model_key: str) -> bool:
     cfg = API_MODELS.get(model_key, {})
-    if cfg.get("type") == "anthropic" and not ANTHROPIC_API_KEY:
-        return True
     if cfg.get("type") == "volc" and not ARK_API_KEY:
         return True
     return False
 
 
 def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(TABLES_DIR, exist_ok=True)
     from config import ALL_MODELS
 
     for key in ALL_MODELS:
-        out_path = os.path.join(OUTPUT_DIR, f"{key}.bin")
+        out_path = os.path.join(TABLES_DIR, f"{key}.bin")
         if os.path.exists(out_path):
             print(f"[{key}] already exists, skipping")
             continue

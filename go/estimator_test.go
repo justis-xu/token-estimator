@@ -19,7 +19,11 @@ type goldenEntry struct {
 
 func loadGolden(t *testing.T) []goldenEntry {
 	t.Helper()
-	dir := os.Getenv("TOKEN_TABLES_DIR")
+	// GOLDEN_DIR 单独指向 python/output；未设置时回退到 TOKEN_TABLES_DIR
+	dir := os.Getenv("GOLDEN_DIR")
+	if dir == "" {
+		dir = os.Getenv("TOKEN_TABLES_DIR")
+	}
 	if dir == "" {
 		t.Skip("TOKEN_TABLES_DIR not set")
 	}
@@ -91,19 +95,16 @@ func TestLoadReturnsErrorWhenConfigJSONIsInvalid(t *testing.T) {
 	}
 }
 
-func TestEstimateFallsBackWhenModelTableIsMissing(t *testing.T) {
-	doubao := make([]byte, cjkCount)
-	for i := range doubao {
-		doubao[i] = 2
-	}
+func TestEstimateFallsBackToDefaultCJKWhenModelTableMissing(t *testing.T) {
+	// 未知模型无词表，走除数兜底：2字 × (1/1.5) = 1.33 → round = 1
 	tables := &Tables{
-		bins:      map[string][]byte{"doubao": doubao},
+		bins:      map[string][]byte{},
 		discounts: map[string]segmentedDiscount{"default": {Zh: 1.0, Mixed: 1.0, En: 1.0}},
 	}
 
 	got := tables.Estimate("你好", "qwen")
-	if got != 4 {
-		t.Fatalf("Estimate() = %d, want 4 from doubao fallback table", got)
+	if got != 1 {
+		t.Fatalf("Estimate() = %d, want 1 from DefaultCJK divisor fallback", got)
 	}
 }
 
@@ -161,8 +162,8 @@ func TestEstimateFallsBackToDefaultCJKTokenWhenDoubaoIsMissing(t *testing.T) {
 	}
 
 	got := tables.Estimate("你好", "qwen")
-	if got != 3 {
-		t.Fatalf("Estimate() = %d, want 3 from built-in CJK fallback", got)
+	if got != 1 {
+		t.Fatalf("Estimate() = %d, want 1 from DefaultCJK divisor fallback", got)
 	}
 }
 
@@ -198,8 +199,9 @@ func TestInitLoadsDefaultTables(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Estimate() error = %v, want nil", err)
 	}
-	if got != 2 {
-		t.Fatalf("Estimate() = %d, want 2", got)
+	// missing-model 无词表，走除数兜底：2字 × (1/1.5) = 1.33 → round = 1
+	if got != 1 {
+		t.Fatalf("Estimate() = %d, want 1", got)
 	}
 }
 
