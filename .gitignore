@@ -3,3 +3,4 @@ __pycache__/
 .claude/
 python/output/golden.jsonl
 python/output/corpus.jsonl
+python/output/

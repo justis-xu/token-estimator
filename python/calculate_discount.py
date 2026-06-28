@@ -28,6 +28,7 @@ from config import (
     OUTPUT_DIR, TABLES_DIR, HF_TOKEN, ARK_API_KEY,
 )
 from estimate import estimate_split, classify_text, DEFAULT_WEIGHTS
+from hf_data import ensure_output_file
 
 CATEGORIES = ("zh", "mixed", "en")
 
@@ -171,9 +172,7 @@ def calc_discount(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    corpus_path = os.path.join(OUTPUT_DIR, "corpus.jsonl")
-    if not os.path.exists(corpus_path):
-        raise FileNotFoundError(f"{corpus_path} 不存在，请先运行 scrape_corpus.py")
+    corpus_path = ensure_output_file("corpus.jsonl")
 
     corpus = []
     with open(corpus_path, encoding="utf-8") as f:

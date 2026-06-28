@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from calculate_discount import real_count
 from config import ALL_MODELS, API_MODELS, OUTPUT_DIR
+from hf_data import ensure_output_file
 
 
 def _rate_limit_interval(model_key: str) -> float:
@@ -67,9 +68,7 @@ def _api_key_missing(model_key: str) -> bool:
 
 
 def main():
-    corpus_path = os.path.join(OUTPUT_DIR, "corpus.jsonl")
-    if not os.path.exists(corpus_path):
-        raise FileNotFoundError(f"{corpus_path} — run scrape_corpus.py first")
+    corpus_path = ensure_output_file("corpus.jsonl")
 
     corpus = []
     with open(corpus_path, encoding="utf-8") as f:

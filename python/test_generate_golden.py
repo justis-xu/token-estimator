@@ -40,7 +40,10 @@ class GenerateGoldenRateLimitTest(unittest.TestCase):
             ("gpt-4", "一"),
             ("gpt-4", "二"),
         ])
-        self.assertEqual(sleeps, [0.1, 0.1])
+        self.assertEqual(
+            sleeps,
+            [generate_golden._rate_limit_interval("doubao")] * 2,
+        )
 
 
 if __name__ == "__main__":

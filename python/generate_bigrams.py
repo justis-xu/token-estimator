@@ -23,6 +23,7 @@ from config import (
     CJK_START, CJK_END,
     OUTPUT_DIR, TABLES_DIR, HF_TOKEN, ARK_API_KEY,
 )
+from hf_data import ensure_output_file
 
 TOP_N = 5000  # most-frequent bigrams to cover
 
@@ -169,9 +170,7 @@ def build_bigram(model_key: str, bigrams: list[str]) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 def main():
-    corpus_path = os.path.join(OUTPUT_DIR, "corpus.jsonl")
-    if not os.path.exists(corpus_path):
-        raise FileNotFoundError("corpus.jsonl not found — run scrape_corpus.py first")
+    corpus_path = ensure_output_file("corpus.jsonl")
 
     print(f"Extracting top {TOP_N} bigrams from corpus ...")
     bigrams = extract_top_bigrams(corpus_path, TOP_N)

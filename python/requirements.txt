@@ -4,3 +4,4 @@ tiktoken
 requests
 anthropic
 datasets
+huggingface_hub

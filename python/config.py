@@ -42,3 +42,6 @@ OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
 TABLES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tables")
 HF_TOKEN   = os.environ.get("HF_TOKEN", "")
 ARK_API_KEY = os.environ.get("ARK_API_KEY", "")
+HF_DATASET_REPO = "justis-xu/token-estimator-data"
+HF_DATASET_REVISION = os.environ.get("HF_DATASET_REVISION", "main")
+HF_DATASET_SUBDIR = ""

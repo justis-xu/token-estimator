@@ -103,6 +103,42 @@ python calculate_weights.py  # 生成 ../tables/config.json weights 段（字符
 python calculate_discount.py # 更新 ../tables/config.json discount 段（分段 discount 系数）
 ```
 
+### 校准数据放到 Hugging Face Dataset
+
+如果 `python/output/` 太大不适合进 Git，可以单独放到 HF dataset repo。
+
+先准备环境变量：
+
+```bash
+cd python
+pip install -r requirements.txt
+
+export HF_TOKEN=hf_xxx
+```
+
+项目固定使用 HF dataset 仓库 `justis-xu/token-estimator-data`。
+普通使用者不需要配置仓库地址；只有维护数据上传时才需要 `HF_TOKEN`。
+
+上传本地产物：
+
+```bash
+python sync_hf_dataset.py upload corpus.jsonl golden.jsonl
+```
+
+从 HF 拉回本地：
+
+```bash
+python sync_hf_dataset.py download corpus.jsonl golden.jsonl
+```
+
+以下脚本在本地缺少 `python/output/corpus.jsonl` 时会自动从 HF dataset 下载：
+
+- `python/generate_bigrams.py`
+- `python/generate_golden.py`
+- `python/calculate_discount.py`
+
+建议把仓库里只保留代码和少量样例，不保留完整校准语料。
+
 ### 2. 在 Go 服务里使用（在线）
 
 ```go
