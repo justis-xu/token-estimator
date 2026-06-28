@@ -32,6 +32,9 @@ def ensure_output_file(filename: str) -> str:
             f"{path} not found, and HF_DATASET_REPO is not set for fallback download"
         )
 
+    # Prefer the plain Hub download path over Xet on local developer machines.
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
     from huggingface_hub import hf_hub_download
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -41,6 +44,7 @@ def ensure_output_file(filename: str) -> str:
         filename=_remote_path(filename),
         revision=HF_DATASET_REVISION,
         local_dir=OUTPUT_DIR,
+        token=os.environ.get("HF_TOKEN") or None,
     )
     local_path = Path(downloaded)
     if local_path.name == filename:
@@ -50,4 +54,3 @@ def ensure_output_file(filename: str) -> str:
     expected.parent.mkdir(parents=True, exist_ok=True)
     expected.write_bytes(local_path.read_bytes())
     return str(expected)
-
